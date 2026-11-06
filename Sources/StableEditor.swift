@@ -228,7 +228,7 @@ final class CopyActionButton:NSButton {
         let paragraph=NSMutableParagraphStyle();paragraph.lineBreakMode = .byTruncatingTail
         let attributes:[NSAttributedString.Key:Any]=[.font:NSFont.systemFont(ofSize:14,weight:.semibold),.foregroundColor:NSColor.white,.paragraphStyle:paragraph]
         let size=(title as NSString).size(withAttributes:attributes),total=min(size.width,bounds.width-48)+26,x=(bounds.width-total)/2
-        let icon=NSImage(systemSymbolName:title == "已复制" ? "checkmark" : title.hasPrefix("发给") ? "paperplane.fill" : "doc.on.doc",accessibilityDescription:nil)?.withSymbolConfiguration(.init(paletteColors:[.white]))
+        let icon=NSImage(systemSymbolName:title == "已复制" ? "checkmark" : title == "一键转发" ? "paperplane.fill" : "doc.on.doc",accessibilityDescription:nil)?.withSymbolConfiguration(.init(paletteColors:[.white]))
         icon?.draw(in:NSRect(x:x,y:(bounds.height-18)/2,width:18,height:18))
         (title as NSString).draw(in:NSRect(x:x+26,y:(bounds.height-size.height)/2,width:bounds.width-x-34,height:size.height),withAttributes:attributes)
     }

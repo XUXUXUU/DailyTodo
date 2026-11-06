@@ -4,15 +4,22 @@ import Darwin
 
 enum FeishuDeliveryMode:String,Codable,CaseIterable {
     case draft,send
-    var title:String { self == .draft ? "填入草稿" : "直接发送" }
+    var title:String { self == .draft ? "确认后发送" : "直接发送" }
 }
 struct FeishuAutomationConfiguration:Codable,Equatable {
     var enabled=false
     var recipient="何雪瑶"
     var mode:FeishuDeliveryMode = .draft
     var recipientIsSelf=false
+    func canDispatch(confirmed:Bool,selfTest:Bool)->Bool {selfTest || (enabled && (mode == .send || confirmed))}
     static let key="feishuAutomationV1"
-    var buttonTitle:String { "发给" + (recipient == "何雪瑶" ? "瑶总" : recipient) }
+    var buttonTitle:String { enabled ? "一键转发" : "复制全部" }
+    var productionSafe:Self {
+        var result=self
+        if recipient != "何雪瑶" || recipientIsSelf {result.enabled=false}
+        result.recipient="何雪瑶";result.recipientIsSelf=false
+        return result
+    }
     static func load(from defaults:UserDefaults)->Self {
         guard let data=defaults.data(forKey:key),let config=try? JSONDecoder().decode(Self.self,from:data),
               (try? config.validated()) != nil else {return Self()}
@@ -34,6 +41,19 @@ enum FeishuAutomationError:LocalizedError {
     var errorDescription:String? { if case .message(let s)=self {return s};return nil }
 }
 enum FeishuAutomationRules {
+    static func selfName(profileTexts:[String])->String? {
+        guard let first=profileTexts.first else {return nil}
+        let name=normalized(first)
+        guard !name.isEmpty,name.count <= 80,name.rangeOfCharacter(from:.controlCharacters)==nil,
+              profileTexts.contains(where:{$0.contains("我的个人名片")}),
+              profileTexts.contains(where:{$0.contains("退出登录")}),
+              !["我的个人名片","退出登录","设置","已认证","未认证","状态"].contains(name),
+              !["已认证","未认证"].contains(profileTexts.dropFirst().first.map(normalized) ?? "") else {return nil}
+        return name
+    }
+    static func isVerifiedSelfComposer(_ value:String,editableText:Bool)->Bool {
+        !editableText && compact(value)=="可以向自己发送文件或转发消息"
+    }
     static func normalized(_ text:String)->String {
         text.replacingOccurrences(of:"\u{200b}",with:"").replacingOccurrences(of:"\u{feff}",with:"")
             .replacingOccurrences(of:"\u{2060}",with:"").trimmingCharacters(in:.whitespacesAndNewlines)
@@ -54,6 +74,7 @@ enum FeishuAutomationRules {
     }
     static func isEmptyComposer(_ value:String,name:String,isSelf:Bool,readable:Bool,editableText:Bool)->Bool {
         guard readable else {return false}
+        if isSelf {return isVerifiedSelfComposer(value,editableText:editableText)}
         let text=normalized(value)
         return text.isEmpty || (!editableText && recipientMatches(text,name:name,isSelf:isSelf))
     }
@@ -93,5 +114,21 @@ struct FeishuDeliveryLedger {
     }
     func finish(_ fingerprint:String,sent:Bool)throws {
         try transaction {$0[fingerprint] = sent ? "sent" : "unconfirmed"}
+    }
+}
+
+/// Account cards render in stages. A plausible first text is not yet an identity.
+struct FeishuProfileReadiness {
+    private var texts:[String]=[]
+    private var nodes=0
+    private var since:TimeInterval=0
+    mutating func sample(texts:[String],nodeCount:Int,at now:TimeInterval)->String? {
+        guard let name=FeishuAutomationRules.selfName(profileTexts:texts) else {
+            self.texts=[];nodes=0;since=now;return nil
+        }
+        guard self.texts==texts,nodes==nodeCount else {
+            self.texts=texts;nodes=nodeCount;since=now;return nil
+        }
+        return now-since >= 0.6 ? name : nil
     }
 }

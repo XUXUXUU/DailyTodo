@@ -22,7 +22,8 @@ struct OnboardingView: View {
             }.accessibilityLabel("第\(step+1)页，共4页").padding(.top,14).padding(.bottom,20)
             ScrollView {
                 VStack(spacing:20) {
-                    Text(["几点提醒？","开启提醒","飞书自动化","设置完成"][step]).font(.system(size:26,weight:.semibold))
+                    Text(["几点提醒？","开启提醒","一键转发 Todo","设置完成"][step]).font(.system(size:26,weight:.semibold))
+                        .accessibilityAddTraits(.isHeader)
                     switch step {
                     case 0: timePage
                     case 1: reminderPage
@@ -36,6 +37,7 @@ struct OnboardingView: View {
                 Spacer()
                 Button(step == 3 ? "开始使用" : saving ? "保存中…" : "下一步") { advance() }
                     .buttonStyle(.borderedProminent).controlSize(.large)
+                    .keyboardShortcut(.defaultAction)
                     .disabled(saving || (step == 0 && (services.busy || !draft.isValid)))
             }.padding(.horizontal,24).padding(.vertical,18)
         }.frame(width:min(560,(NSScreen.main?.visibleFrame.width ?? 900)-60),height:min(510,(NSScreen.main?.visibleFrame.height ?? 900)-90))
@@ -69,19 +71,39 @@ struct OnboardingView: View {
         }
     }
     var automationPage:some View {
-        VStack(spacing:14) {
-            AutomationSettingsEntry(automation:automation)
-                .background(.regularMaterial,in:RoundedRectangle(cornerRadius:18))
-            Text("自定义联系人和发送方式，也可以稍后在设置中开启。")
-                .font(.system(size:13)).foregroundStyle(.secondary)
-        }
+        AutomationSettingsEntry(automation:automation,prominent:true)
+            .frame(maxWidth:300).padding(.top,7)
     }
     var donePage:some View {
-        VStack(spacing:18) {
-            Image(systemName:"checkmark.circle.fill").font(.system(size:42)).foregroundStyle(blue).padding(.top,28)
-            Text("以后可以在设置中修改").font(.system(size:14)).foregroundStyle(.secondary)
-            if !services.notificationsOn && !services.popupOn { Text("提醒尚未开启").font(.system(size:12)).foregroundStyle(.secondary) }
+        VStack(spacing:24) {
+            Image(systemName:"checkmark.circle.fill").font(.system(size:76)).foregroundStyle(blue)
+                .accessibilityHidden(true).padding(.top,4)
+            VStack(spacing:0) {
+                completionRow(title:"提醒时间",icon:"clock",value:services.config.time.text)
+                rowDivider
+                completionRow(title:"提醒方式",icon:"bell",value:reminderStatus)
+                rowDivider
+                completionRow(title:"一键转发 Todo",icon:"paperplane.fill",value:automation.configuration.enabled && automation.trusted ? "开启" : "未开启")
+            }
+            .background(.regularMaterial,in:RoundedRectangle(cornerRadius:16))
+            .overlay(RoundedRectangle(cornerRadius:16).strokeBorder(blue.opacity(0.12)))
         }
+    }
+    private var reminderStatus:String {
+        switch (services.notificationsOn,services.popupOn) {
+        case (true,true): return "通知、弹窗"
+        case (true,false): return "系统通知"
+        case (false,true): return "自动弹窗"
+        default: return "未开启"
+        }
+    }
+    private func completionRow(title:String,icon:String,value:String)->some View {
+        HStack(spacing:12) {
+            Image(systemName:icon).font(.system(size:15)).foregroundStyle(blue).frame(width:22)
+            Text(title).font(.system(size:13,weight:.medium))
+            Spacer(minLength:12)
+            Text(value).font(.system(size:13,weight:.medium)).foregroundStyle(.secondary)
+        }.padding(.horizontal,16).frame(minHeight:44)
     }
     var rowDivider:some View { Divider().padding(.leading,50) }
     func advance() {

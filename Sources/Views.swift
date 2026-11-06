@@ -41,6 +41,8 @@ struct RootView: View {
     let pageChanged:(String)->Void
     @StateObject private var editorFocus=EditorFocus()
     @StateObject private var automation=FeishuAutomationController()
+    @State private var pendingForward:Entry?
+    @State private var feedbackSucceeded=true
     @State private var copyToastTitle="已复制到剪贴板"
     @State private var copyHovered=false
     @State private var copyFlash=false
@@ -114,6 +116,20 @@ struct RootView: View {
                 }
             }
         }
+        .sheet(item:$pendingForward) {entry in
+            VStack(spacing:18) {
+                Label("确认转发",systemImage:"paperplane.fill").font(.title2.weight(.semibold)).foregroundStyle(Theme.blue)
+                Text("收件人：何雪瑶").font(.headline)
+                ScrollView {Text(CopyFormatter.text(entry)).font(.system(size:14)).frame(maxWidth:.infinity,alignment:.leading).padding(14)}
+                    .frame(maxHeight:260).background(.regularMaterial,in:RoundedRectangle(cornerRadius:14))
+                HStack {
+                    Button("取消") {pendingForward=nil}.keyboardShortcut(.cancelAction)
+                    Spacer()
+                    Button("确认发送") {pendingForward=nil;performCopy(forward:true,confirmedSnapshot:entry)}
+                        .buttonStyle(.borderedProminent).keyboardShortcut(.defaultAction)
+                }
+            }.padding(24).frame(width:440).tint(Theme.blue)
+        }
         .sheet(isPresented:$model.showOnboarding,onDismiss:{model.onboardingSheetClosed()}) {
             OnboardingView(model:model,services:services,automation:automation)
         }
@@ -146,7 +162,7 @@ struct RootView: View {
             Label(model.saveStatus,systemImage:model.saveStatus == "已自动保存" ? "checkmark.circle.fill" : "exclamationmark.circle")
                 .font(.system(size:12)).foregroundStyle(model.saveStatus == "保存失败" || model.store == nil ? Color.orange : Color.secondary)
             Spacer()
-            NativeCopyButton(copied:copied && !automation.busy,title:automation.busy ? "处理中…" : automation.configuration.enabled ? automation.effectiveConfiguration.buttonTitle : "复制全部",enabled:model.store != nil && !showsShortcutSettings && !automation.busy,focus:editorFocus,nextEditorKey:model.page == "today" ? shortcuts.next : nil,action:copy,hover:{value in
+            NativeCopyButton(copied:copied && !automation.busy && !automation.configuration.enabled,title:automation.busy ? "处理中…" : automation.configuration.buttonTitle,enabled:model.store != nil && !showsShortcutSettings && !automation.busy,focus:editorFocus,nextEditorKey:model.page == "today" ? shortcuts.next : nil,action:copy,hover:{value in
                 withAnimation(.easeOut(duration:reduceMotion ? 0:0.21)){copyHovered=value && model.page == "today"}
             }).frame(width:130,height:40)
         }.padding(.horizontal,24).padding(.vertical,16).background(.bar)
@@ -294,7 +310,7 @@ struct RootView: View {
     }
     var copyToast: some View {
         VStack(spacing:12) {
-            Image(systemName:"checkmark").font(.system(size:22,weight:.bold)).foregroundStyle(.white)
+            Image(systemName:automation.busy ? "paperplane.fill" : feedbackSucceeded ? "checkmark" : "exclamationmark").font(.system(size:22,weight:.bold)).foregroundStyle(.white)
                 .frame(width:43,height:43).background(Color.white.opacity(0.18),in:Circle())
                 .overlay(Circle().stroke(Color.white.opacity(0.3)))
             Text(automation.busy ? automation.progress : copyToastTitle).font(.system(size:18,weight:.semibold)).foregroundStyle(.white)
@@ -318,15 +334,17 @@ struct RootView: View {
     }
     func copy() {performCopy(forward:true)}
     func copyOnly() {performCopy(forward:false)}
-    func performCopy(forward:Bool) {
+    func performCopy(forward:Bool,confirmedSnapshot:Entry?=nil) {
         let shouldForward=forward && automation.configuration.enabled
         guard !showsShortcutSettings && !automation.busy else { return }
         editorFocus.commitComposition()
         model.activate()
         guard model.entry.day == ReminderRules.day(Date()) else { model.problem = "当天记录尚未加载，复制已暂停，请先解决保存错误。"; return }
-        let snapshot=model.entry
+        let snapshot=confirmedSnapshot ?? model.entry
+        guard snapshot.day == ReminderRules.day(Date()) else {model.problem="日期已变化，请重新转发今天的 Todo。";return}
         if shouldForward && [snapshot.tasks,snapshot.progress,snapshot.blockers].allSatisfy({$0.trimmingCharacters(in:.whitespacesAndNewlines).isEmpty}) {model.problem="请先填写 Todo，再转发。";return}
         guard model.flush() else {return}
+        if shouldForward && automation.configuration.mode == .draft && confirmedSnapshot == nil {pendingForward=snapshot;return}
         flashTask?.cancel()
         if model.page == "today" && !reduceMotion {
             copyFlash=true
@@ -339,15 +357,15 @@ struct RootView: View {
         let pasteboard = NSPasteboard.general; pasteboard.clearContents()
         if pasteboard.setString(CopyFormatter.text(snapshot),forType:.string) {
             services.recordCopiedToday()
-            feishuFeedback=nil
+            feishuFeedback=nil;feedbackSucceeded=true
             copyToastTitle="已复制到剪贴板"
             toastTask?.cancel(); copied = true
             toastMessage = copyMessagesEnabled ? messagePicker.next() : nil
             if let message = toastMessage { Runtime.defaults.set(message,forKey:"lastCopyMessage") }
             withAnimation(.easeOut(duration:reduceMotion ? CopyFeedbackTiming.reducedEnter : CopyFeedbackTiming.enter)) { toastVisible = true }
             if shouldForward {
-                automation.forward(text:CopyFormatter.text(snapshot),day:snapshot.day) {outcome in
-                    copyToastTitle=outcome.title;feishuFeedback=outcome.detail
+                automation.forward(text:CopyFormatter.text(snapshot),day:snapshot.day,confirmed:confirmedSnapshot != nil) {outcome in
+                    copyToastTitle=outcome.title;feishuFeedback=outcome.detail;feedbackSucceeded=outcome.successful
                     dismissFeedbackLater()
                 }
             } else {dismissFeedbackLater()}

@@ -8,39 +8,49 @@ struct FeishuAutomationOutcome {
     let successful:Bool
 }
 @MainActor final class FeishuAutomationController:ObservableObject {
-    @Published private(set) var configuration=FeishuAutomationConfiguration.load(from:Runtime.defaults)
+    @Published private(set) var configuration=FeishuAutomationConfiguration.load(from:Runtime.defaults).productionSafe
     @Published private(set) var busy=false
     @Published private(set) var progress=""
     @Published private(set) var lastResult:String?
+    @Published private(set) var testResult:String?
+    @Published private(set) var detectedSelfName:String?
     private var task:Task<Void,Never>?
-    var effectiveConfiguration:FeishuAutomationConfiguration {
-        var config=configuration
-        if Runtime.sessionID != nil {config.recipient="安龙";config.recipientIsSelf=true}
-        return config
-    }
+    var effectiveConfiguration:FeishuAutomationConfiguration {configuration.productionSafe}
     var trusted:Bool {AXIsProcessTrusted()}
     func save(_ value:FeishuAutomationConfiguration)throws {
-        guard !busy else {throw FeishuAutomationError.message("正在转发，请先取消当前操作再修改。")};try value.save(to:Runtime.defaults);configuration=FeishuAutomationConfiguration.load(from:Runtime.defaults)
+        guard !busy else {throw FeishuAutomationError.message("正在转发，请先取消当前操作再修改。")};guard !value.enabled || trusted else {throw FeishuAutomationError.message("请先开启辅助功能。")};try value.productionSafe.save(to:Runtime.defaults);configuration=FeishuAutomationConfiguration.load(from:Runtime.defaults).productionSafe
     }
     func requestPermission() {
-        let options=[kAXTrustedCheckOptionPrompt.takeUnretainedValue() as String:true] as CFDictionary
-        _ = AXIsProcessTrustedWithOptions(options)
-        openPermissions()
+        openPermissions();AccessibilityGuide.shared.show()
     }
     func openPermissions() {
         if let url=URL(string:"x-apple.systempreferences:com.apple.preference.security?Privacy_Accessibility") {NSWorkspace.shared.open(url)}
     }
     func cancel() {task?.cancel()}
-    func forward(text:String,day:String,completion:@escaping (FeishuAutomationOutcome)->Void) {
+    func testSelf() {
+        begin(text:"Daily Todo 转发测试\n这是一条发给自己的测试消息。",day:ReminderRules.day(Date()),selfTest:true,confirmed:true) {_ in}
+    }
+    func forward(text:String,day:String,confirmed:Bool=false,completion:@escaping (FeishuAutomationOutcome)->Void) {
+        begin(text:text,day:day,selfTest:false,confirmed:confirmed,completion:completion)
+    }
+    private func begin(text:String,day:String,selfTest:Bool,confirmed:Bool,completion:@escaping (FeishuAutomationOutcome)->Void) {
         guard !busy else{return}
-        let config=effectiveConfiguration
+        let testingSelf=selfTest || Runtime.sessionID != nil
+        let original=effectiveConfiguration
+        guard original.canDispatch(confirmed:confirmed,selfTest:selfTest) else {
+            completion(FeishuAutomationOutcome(title:"请先确认发送",detail:nil,successful:false));return
+        }
+        var config=original
+        config.mode = .send
+        if testingSelf {config.recipient="";config.recipientIsSelf=true;testResult=nil;detectedSelfName=nil}
+        let deliveryConfiguration=config
         let clipboardGeneration=NSPasteboard.general.changeCount
         busy=true;progress="正在连接飞书…";lastResult=nil
         task=Task {
             let outcome:FeishuAutomationOutcome
             do {
-                guard trusted else {throw FeishuAutomationError.message("辅助功能尚未授权。请在自动化设置中授权后重试；正文仍在剪贴板中。")}
-                guard let url=NSWorkspace.shared.urlForApplication(withBundleIdentifier:"com.electron.lark") else {throw FeishuAutomationError.message("未找到飞书，请先安装飞书。正文仍在剪贴板中。")}
+                guard trusted else {throw FeishuAutomationError.message("请先在一键转发设置中开启辅助功能。")}
+                guard let url=NSWorkspace.shared.urlForApplication(withBundleIdentifier:"com.electron.lark") else {throw FeishuAutomationError.message("未找到飞书，请先安装飞书。")}
                 let app=try await withCheckedThrowingContinuation { (continuation:CheckedContinuation<NSRunningApplication,Error>) in
                     let options=NSWorkspace.OpenConfiguration();options.activates=true
                     NSWorkspace.shared.openApplication(at:url,configuration:options) {app,error in
@@ -63,16 +73,24 @@ struct FeishuAutomationOutcome {
                 try Task.checkCancellation()
                 let worker=Task.detached(priority:.userInitiated) {
                     let session=FeishuAXSession(pid:app.processIdentifier)
-                    return try await session.deliver(text:text,day:day,config:config,clipboardGeneration:clipboardGeneration,ledger:FeishuDeliveryLedger(directory:Runtime.dataDirectory)) { stage in
+                    var delivery=deliveryConfiguration
+                    if testingSelf {
+                        await MainActor.run {self.progress="正在识别本人账号…"}
+                        let name=try await session.discoverSelf()
+                        delivery.recipient=name;delivery.recipientIsSelf=true
+                        await MainActor.run {self.detectedSelfName=name}
+                    }
+                    return try await session.deliver(text:text,day:day,config:delivery,clipboardGeneration:clipboardGeneration,ledger:FeishuDeliveryLedger(directory:Runtime.dataDirectory)) { stage in
                         Task { @MainActor in self.progress=stage }
                     }
                 }
                 outcome=try await withTaskCancellationHandler(operation:{try await worker.value},onCancel:{worker.cancel()})
             } catch {
-                outcome=FeishuAutomationOutcome(title:"已复制，飞书操作未完成",detail:error is CancellationError ? "操作已取消，请检查飞书草稿。不会自动重发。" : error.localizedDescription,successful:false)
+                outcome=FeishuAutomationOutcome(title:testingSelf ? "测试未完成" : "转发未完成",detail:error is CancellationError ? "操作已取消，请检查飞书草稿。不会自动重发。" : error.localizedDescription,successful:false)
             }
             busy=false;lastResult=outcome.detail ?? outcome.title
-            Runtime.report("feishu-automation",payload:["successful":outcome.successful,"title":outcome.title,"detail":outcome.detail ?? "","recipient":config.recipient,"mode":config.mode.rawValue])
+            if testingSelf {testResult=outcome.successful ? "已向\(detectedSelfName ?? "自己")执行测试发送" : (outcome.detail ?? outcome.title)}
+            Runtime.report("feishu-automation",payload:["successful":outcome.successful,"title":outcome.title,"detail":outcome.detail ?? "","recipient":detectedSelfName ?? config.recipient,"mode":config.mode.rawValue])
             completion(outcome)
         }
     }
@@ -256,6 +274,32 @@ private final class FeishuAXSession:@unchecked Sendable {
         }
         return live
     }
+    func discoverSelf() async throws ->String {
+        let root:FeishuAXNode=try await wait("请先登录飞书后重试。",seconds:25) {root in
+            root.all.contains(where:{$0.role==kAXButtonRole && $0.label=="我的头像"}) ? root : nil
+        }
+        let buttons=root.all.filter{$0.role==kAXButtonRole && $0.label=="我的头像"}
+        guard buttons.count==1 else {try fail("无法确认当前飞书账号，请先检查登录状态。")}
+        try click(buttons[0])
+        let name:String
+        var readiness=FeishuProfileReadiness()
+        do {
+            name=try await wait("没有读到明确的飞书本人姓名，测试已停止。",seconds:10) {root in
+                guard let profile=root.all.first(where:{$0.role=="AXWebArea" && ($0.label=="ternantCardModal" || $0.url.contains("/main-window/ternantCardModal/"))}) else {
+                    return readiness.sample(texts:[],nodeCount:0,at:ProcessInfo.processInfo.systemUptime)
+                }
+                // Electron exposes the WebArea before its account content is loaded.
+                // Wait for verified account content, not merely an empty WebArea.
+                Runtime.report("feishu-profile-readiness",payload:["nodes":profile.all.count,"texts":profile.staticTexts.count,"verified":FeishuAutomationRules.selfName(profileTexts:profile.staticTexts) != nil])
+                return readiness.sample(texts:profile.staticTexts,nodeCount:profile.all.count,at:ProcessInfo.processInfo.systemUptime)
+            }
+        } catch {try? key(53);throw error}
+        try key(53)
+        let _:Bool=try await wait("请先关闭飞书账号卡片后重试。") {root in
+            root.all.contains(where:{$0.role=="AXWebArea" && $0.label=="ternantCardModal"}) ? nil : true
+        }
+        return name
+    }
     func deliver(text:String,day:String,config:FeishuAutomationConfiguration,clipboardGeneration:Int,ledger:FeishuDeliveryLedger,progress:@escaping @Sendable(String)->Void) async throws ->FeishuAutomationOutcome {
         let target=config.recipient
         let fingerprint=FeishuDeliveryLedger.fingerprint(recipient:target,day:day,text:text)
@@ -292,6 +336,11 @@ private final class FeishuAXSession:@unchecked Sendable {
             guard self.searchWeb(root)==nil,let chat=self.chatWeb(root),let editor=self.composer(chat,config:config) else {return nil}
             return (chat,editor)
         }
+        if config.recipientIsSelf {
+            guard FeishuAutomationRules.isVerifiedSelfComposer(pair.1.value,editableText:hasEditableText(pair.1)) else {
+                try fail("未能确认这是本人空聊天，测试已停止；已有内容保持不变。")
+            }
+        }
         guard emptyComposer(pair.1,config:config) else {try fail("这个聊天已有草稿，已保留原文；请处理草稿后再转发。Todo 仍在剪贴板中。")}
         // Composer sibling attachments also belong to an existing draft.
         let draftArea=pair.0.all.first(where:{$0.children.contains(where:{$0 === pair.1})})
@@ -320,7 +369,6 @@ private final class FeishuAXSession:@unchecked Sendable {
             guard let chat=self.chatWeb(root),let editor=self.composer(chat,config:config),FeishuAutomationRules.normalized(editor.value)==FeishuAutomationRules.normalized(text) else {return nil}
             return (chat,editor)
         }
-        if config.mode == .draft {return FeishuAutomationOutcome(title:"已填入\(config.recipient)的聊天",detail:"请检查内容后在飞书中发送。",successful:true)}
         guard filled.0.staticTexts.contains(where:{FeishuAutomationRules.canSendUsingReturn(hint:$0)}) else {try fail("无法确认飞书发送键，已保留草稿，请在飞书中手动发送。")}
         try await focus(filled.1)
         guard FeishuAutomationRules.normalized(FeishuAXNode(filled.1.element).value)==FeishuAutomationRules.normalized(text) else {try fail("草稿已被修改，已取消自动发送。")}
