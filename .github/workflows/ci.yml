@@ -1,0 +1,23 @@
+name: CI
+on:
+  push:
+    branches: [main]
+  pull_request:
+permissions:
+  contents: read
+jobs:
+  test:
+    runs-on: macos-14
+    steps:
+      - uses: actions/checkout@v7
+      - name: Core and editor rules
+        run: |
+          scripts/test.sh
+          scripts/test-shortcuts.sh
+          scripts/test-reminders.sh
+          scripts/test-scheduler.sh
+          scripts/test-editor-model.sh
+          scripts/test-menus.sh
+          scripts/test-wheel-motion.sh
+      - name: Build application
+        run: scripts/build.sh

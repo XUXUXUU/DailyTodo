@@ -1,0 +1,49 @@
+name: Release
+on:
+  push:
+    tags: ['v*']
+  workflow_dispatch:
+permissions:
+  contents: write
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+jobs:
+  release:
+    runs-on: macos-14
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+      - name: Validate release version
+        run: |
+          version=$(/usr/libexec/PlistBuddy -c 'Print CFBundleShortVersionString' Info.plist)
+          test "$(git rev-parse "v$version^{commit}")" = "$(git rev-parse HEAD)"
+          test -f "release-notes/$version.md"
+      - name: Tests
+        run: |
+          scripts/test.sh
+          scripts/test-shortcuts.sh
+          scripts/test-reminders.sh
+          scripts/test-scheduler.sh
+          scripts/test-editor-model.sh
+          scripts/test-menus.sh
+          scripts/test-wheel-motion.sh
+      - name: Build universal application
+        run: scripts/build-universal.sh
+      - name: Sign update assets
+        env:
+          SPARKLE_KEY: ${{ secrets.SPARKLE_EDDSA_PRIVATE_KEY }}
+        run: |
+          umask 077
+          printf '%s' "$SPARKLE_KEY" > "$RUNNER_TEMP/update-key"
+          SPARKLE_PRIVATE_KEY_FILE="$RUNNER_TEMP/update-key" python3 scripts/package-release.py
+      - name: Remove temporary signing key
+        if: always()
+        run: rm -f "$RUNNER_TEMP/update-key"
+      - name: Publish GitHub Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          version=$(/usr/libexec/PlistBuddy -c 'Print CFBundleShortVersionString' Info.plist)
+          gh release create "v$version" "dist/DailyTodo-$version.zip" "dist/DailyTodo-$version.dmg" dist/appcast.xml dist/SHA256SUMS --verify-tag --title "Daily Todo $version" --notes-file "release-notes/$version.md" --latest
