@@ -16,12 +16,12 @@
 - 空闲约三秒自动保存，复制时立即保存。
 - Enter 换行，Tab 下一栏，可自定义快捷键并检查冲突。
 - 复制成功展示蓝色反馈卡片和随机文案。
-- “复制后唤起飞书”默认开启，可在设置中关闭。
+- 设置中可启用“发给瑶总”：自动打开飞书并精确查找联系人；默认仅填入草稿，也可显式选择直接发送。未授权辅助功能、联系人不唯一、已有草稿或发送结果无法确认时会停止，正文仍保留在剪贴板。
 - 固定周一至周五按设置时分提醒，成功复制后当天免提醒。
 - 独立历史快照、跨日继承、系统通知与后台弹窗。
 - 中文菜单、原生自动更新及版本说明。
 
-任务保存在本机 `~/Library/Application Support/DailyTodo`。完成状态保存在独立的 `DailyTodo-ReminderState` 目录，升级会继续使用已有数据。访问 GitHub 用于检查和下载更新，应用不上传任务正文。飞书联动会激活已安装的飞书。
+任务保存在本机 `~/Library/Application Support/DailyTodo`。完成状态保存在独立的 `DailyTodo-ReminderState` 目录，升级会继续使用已有数据。访问 GitHub 用于检查和下载更新，应用不上传任务正文。飞书自动化仅通过本机辅助功能操作已安装的飞书；发送去重记录也只保存在本机。
 
 ## 本地构建
 
@@ -34,7 +34,7 @@ open build/DailyTodo.app
 
 首次构建会下载并验证固定版本 Sparkle 2.10.1。依赖不提交到仓库。Xcode 用户先运行 `scripts/bootstrap-sparkle.sh`，再打开 `DailyTodo.xcodeproj`。项目已包含框架链接和嵌入步骤。
 
-`scripts/build-universal.sh` 生成通用发布版本。`scripts/test.sh`、`scripts/test-shortcuts.sh`、`scripts/test-reminders.sh`、`scripts/test-menus.sh`、`scripts/test-wheel-motion.sh` 可运行本地回归。
+`scripts/build-universal.sh` 生成通用发布版本。`scripts/test.sh`、`scripts/test-shortcuts.sh`、`scripts/test-reminders.sh`、`scripts/test-menus.sh`、`scripts/test-wheel-motion.sh`、`scripts/test-feishu.sh` 可运行本地回归。
 
 集成测试使用独立应用标识 `com.personal.dailytodo.testing` 和 `DailyTodoTesting/<UUID>` 数据目录，必须指定有效会话。测试构建关闭自动更新。不要用正式应用标识运行通知调度实验。
 

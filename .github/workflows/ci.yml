@@ -17,6 +17,7 @@ jobs:
           scripts/test-reminders.sh
           scripts/test-scheduler.sh
           scripts/test-editor-model.sh
+          scripts/test-feishu.sh
           scripts/test-menus.sh
           scripts/test-wheel-motion.sh
       - name: Build application

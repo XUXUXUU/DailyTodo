@@ -16,7 +16,7 @@ import UserNotifications
     }
     func finishOnboarding(completed: Bool) {
         onboardingExitRecorded = true
-        Runtime.defaults.set(15,forKey:"onboardingFlowVersion")
+        Runtime.defaults.set(112,forKey:"onboardingFlowVersion")
         Runtime.defaults.set(completed,forKey:"onboardingCompleted")
         Runtime.defaults.set(!completed,forKey:"onboardingSkipped")
         Runtime.defaults.set(true,forKey:"onboarded")

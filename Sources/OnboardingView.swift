@@ -4,6 +4,7 @@ import AppKit
 struct OnboardingView: View {
     @ObservedObject var model:Model
     @ObservedObject var services:Services
+    @ObservedObject var automation:FeishuAutomationController
     @State private var step=0
     @State private var draft:ReminderTime = .defaultTime
     @State private var saving=false
@@ -17,14 +18,15 @@ struct OnboardingView: View {
                 Button("跳过") { model.finishOnboarding(completed:false) }.buttonStyle(NavigationButtonStyle())
             }.padding(.horizontal,24).padding(.top,20)
             HStack(spacing:7) {
-                ForEach(0..<3,id:\.self) { index in Circle().fill(index == step ? blue : Color.secondary.opacity(0.25)).frame(width:6,height:6) }
-            }.accessibilityLabel("第\(step+1)页，共3页").padding(.top,14).padding(.bottom,20)
+                ForEach(0..<4,id:\.self) { index in Circle().fill(index == step ? blue : Color.secondary.opacity(0.25)).frame(width:6,height:6) }
+            }.accessibilityLabel("第\(step+1)页，共4页").padding(.top,14).padding(.bottom,20)
             ScrollView {
                 VStack(spacing:20) {
-                    Text(["几点提醒？","开启提醒","设置完成"][step]).font(.system(size:26,weight:.semibold))
+                    Text(["几点提醒？","开启提醒","飞书自动化","设置完成"][step]).font(.system(size:26,weight:.semibold))
                     switch step {
                     case 0: timePage
                     case 1: reminderPage
+                    case 2: automationPage
                     default: donePage
                     }
                 }.padding(.horizontal,28).padding(.bottom,18).frame(maxWidth:.infinity)
@@ -32,7 +34,7 @@ struct OnboardingView: View {
             HStack {
                 if step > 0 { Button { step -= 1 } label: { Label("上一步",systemImage:"chevron.left") }.buttonStyle(NavigationButtonStyle()) }
                 Spacer()
-                Button(step == 2 ? "开始使用" : saving ? "保存中…" : "下一步") { advance() }
+                Button(step == 3 ? "开始使用" : saving ? "保存中…" : "下一步") { advance() }
                     .buttonStyle(.borderedProminent).controlSize(.large)
                     .disabled(saving || (step == 0 && (services.busy || !draft.isValid)))
             }.padding(.horizontal,24).padding(.vertical,18)
@@ -66,6 +68,14 @@ struct OnboardingView: View {
             if services.needsPermissionHelp { Button("打开系统设置") { services.openRelevantSettings() }.buttonStyle(.link) }
         }
     }
+    var automationPage:some View {
+        VStack(spacing:14) {
+            AutomationSettingsEntry(automation:automation)
+                .background(.regularMaterial,in:RoundedRectangle(cornerRadius:18))
+            Text("自定义联系人和发送方式，也可以稍后在设置中开启。")
+                .font(.system(size:13)).foregroundStyle(.secondary)
+        }
+    }
     var donePage:some View {
         VStack(spacing:18) {
             Image(systemName:"checkmark.circle.fill").font(.system(size:42)).foregroundStyle(blue).padding(.top,28)
@@ -78,7 +88,7 @@ struct OnboardingView: View {
         if step == 0 {
             saving=true
             Task { let saved=await services.apply(time:draft);saving=false;if saved && step == 0 && model.showOnboarding { step=1 } }
-        } else if step == 1 { step=2 }
+        } else if step < 3 { step += 1 }
         else { model.finishOnboarding(completed:true) }
     }
 }

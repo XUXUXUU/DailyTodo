@@ -225,15 +225,17 @@ final class CopyActionButton:NSButton {
         if isHighlighted {NSColor.black.withAlphaComponent(0.12).setFill();path.fill()};NSGraphicsContext.restoreGraphicsState()
         let focused=window?.firstResponder === self
         NSColor.white.withAlphaComponent(focused ? 0.95:0.3).setStroke();path.lineWidth=focused ? 2.5:1;path.stroke()
-        let attributes:[NSAttributedString.Key:Any]=[.font:NSFont.systemFont(ofSize:14,weight:.semibold),.foregroundColor:NSColor.white]
-        let size=(title as NSString).size(withAttributes:attributes),total=size.width+26,x=(bounds.width-total)/2
-        let icon=NSImage(systemSymbolName:title == "已复制" ? "checkmark":"doc.on.doc",accessibilityDescription:nil)?.withSymbolConfiguration(.init(paletteColors:[.white]))
+        let paragraph=NSMutableParagraphStyle();paragraph.lineBreakMode = .byTruncatingTail
+        let attributes:[NSAttributedString.Key:Any]=[.font:NSFont.systemFont(ofSize:14,weight:.semibold),.foregroundColor:NSColor.white,.paragraphStyle:paragraph]
+        let size=(title as NSString).size(withAttributes:attributes),total=min(size.width,bounds.width-48)+26,x=(bounds.width-total)/2
+        let icon=NSImage(systemSymbolName:title == "已复制" ? "checkmark" : title.hasPrefix("发给") ? "paperplane.fill" : "doc.on.doc",accessibilityDescription:nil)?.withSymbolConfiguration(.init(paletteColors:[.white]))
         icon?.draw(in:NSRect(x:x,y:(bounds.height-18)/2,width:18,height:18))
-        (title as NSString).draw(at:NSPoint(x:x+26,y:(bounds.height-size.height)/2),withAttributes:attributes)
+        (title as NSString).draw(in:NSRect(x:x+26,y:(bounds.height-size.height)/2,width:bounds.width-x-34,height:size.height),withAttributes:attributes)
     }
 }
 struct NativeCopyButton:NSViewRepresentable {
     let copied:Bool
+    var title="复制全部"
     let enabled:Bool
     let focus:EditorFocus
     let nextEditorKey: EditorKey?
@@ -246,7 +248,7 @@ struct NativeCopyButton:NSViewRepresentable {
         focus.copyButton=button;return button
     }
     func updateNSView(_ button:CopyActionButton,context:Context) {
-        context.coordinator.parent=self;button.title=copied ? "已复制":"复制全部";button.isEnabled=enabled;button.hoverChanged=hover;button.needsDisplay=true
+        context.coordinator.parent=self;button.title=copied ? "已复制":title;button.toolTip=title;button.isEnabled=enabled;button.hoverChanged=hover;button.needsDisplay=true
         button.nextEditorKey = nextEditorKey
         button.returnToEditor = nextEditorKey == nil ? nil : { [weak focus] in focus?.focus(2) }
     }

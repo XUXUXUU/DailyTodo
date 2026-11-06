@@ -40,6 +40,8 @@ struct RootView: View {
     let show: () -> Void
     let pageChanged:(String)->Void
     @StateObject private var editorFocus=EditorFocus()
+    @StateObject private var automation=FeishuAutomationController()
+    @State private var copyToastTitle="已复制到剪贴板"
     @State private var copyHovered=false
     @State private var copyFlash=false
     @State private var flashTask:Task<Void,Never>?
@@ -53,7 +55,6 @@ struct RootView: View {
     private var reduceMotion:Bool { systemReduceMotion || Runtime.reduceMotionOverride }
     @AppStorage("copyMessagesEnabled",store:Runtime.defaults) private var copyMessagesEnabled = true
     @State private var messagePicker = CopyMessages(messages:(Bundle.main.url(forResource:"CopyMessages",withExtension:"json").flatMap { try? CopyMessages.load($0) } ?? []),previous:Runtime.defaults.string(forKey:"lastCopyMessage"))
-    @AppStorage("openFeishuAfterCopy",store:Runtime.defaults) private var openFeishuAfterCopy = true
     @State private var feishuFeedback:String?
     @State private var selected: String?
     @State private var showsTimeSettings = false
@@ -81,9 +82,9 @@ struct RootView: View {
             if model.page != "settings" { footer }
         }
         .background {
-            Button(action:copy){EmptyView()}
+            Button(action:copyOnly){EmptyView()}
                 .keyboardShortcut("c",modifiers:[.command,.shift])
-                .disabled(model.store == nil || showsShortcutSettings)
+                .disabled(model.store == nil || showsShortcutSettings || automation.busy)
                 .hidden().accessibilityHidden(true)
         }
         .frame(minWidth:model.page == "today" ? 540 : 600,minHeight:620)
@@ -100,7 +101,7 @@ struct RootView: View {
                         .position(x:geometry.size.width/2,y:geometry.size.height*0.45)
                         .transition(reduceMotion ? .opacity : .asymmetric(insertion:.opacity.combined(with:.scale(scale:0.97)).combined(with:.offset(y:8)),removal:.opacity))
                 }
-            }.allowsHitTesting(false)
+            }.allowsHitTesting(automation.busy)
         }
         .onChange(of:model.page) { page in
             copyHovered=false;copyFlash=false;flashTask?.cancel()
@@ -114,7 +115,7 @@ struct RootView: View {
             }
         }
         .sheet(isPresented:$model.showOnboarding,onDismiss:{model.onboardingSheetClosed()}) {
-            OnboardingView(model:model,services:services)
+            OnboardingView(model:model,services:services,automation:automation)
         }
     }
     var header: some View {
@@ -145,7 +146,7 @@ struct RootView: View {
             Label(model.saveStatus,systemImage:model.saveStatus == "已自动保存" ? "checkmark.circle.fill" : "exclamationmark.circle")
                 .font(.system(size:12)).foregroundStyle(model.saveStatus == "保存失败" || model.store == nil ? Color.orange : Color.secondary)
             Spacer()
-            NativeCopyButton(copied:copied,enabled:model.store != nil && !showsShortcutSettings,focus:editorFocus,nextEditorKey:model.page == "today" ? shortcuts.next : nil,action:copy,hover:{value in
+            NativeCopyButton(copied:copied && !automation.busy,title:automation.busy ? "处理中…" : automation.configuration.enabled ? automation.effectiveConfiguration.buttonTitle : "复制全部",enabled:model.store != nil && !showsShortcutSettings && !automation.busy,focus:editorFocus,nextEditorKey:model.page == "today" ? shortcuts.next : nil,action:copy,hover:{value in
                 withAnimation(.easeOut(duration:reduceMotion ? 0:0.21)){copyHovered=value && model.page == "today"}
             }).frame(width:130,height:40)
         }.padding(.horizontal,24).padding(.vertical,16).background(.bar)
@@ -222,7 +223,7 @@ struct RootView: View {
                         settingsDivider
                         AlignedPreferenceToggle(title:"复制后显示趣味文案",icon:"sparkles",isOn:$copyMessagesEnabled)
                         settingsDivider
-                        AlignedPreferenceToggle(title:"复制后唤起飞书",icon:"paperplane.fill",isOn:$openFeishuAfterCopy)
+                        AutomationSettingsEntry(automation:automation)
                         settingsDivider
                         PreferenceRow(title: "编辑快捷键", icon: "keyboard", controlWidth: 190) {
                             Button {
@@ -296,7 +297,8 @@ struct RootView: View {
             Image(systemName:"checkmark").font(.system(size:22,weight:.bold)).foregroundStyle(.white)
                 .frame(width:43,height:43).background(Color.white.opacity(0.18),in:Circle())
                 .overlay(Circle().stroke(Color.white.opacity(0.3)))
-            Text("已复制到剪贴板").font(.system(size:18,weight:.semibold)).foregroundStyle(.white)
+            Text(automation.busy ? automation.progress : copyToastTitle).font(.system(size:18,weight:.semibold)).foregroundStyle(.white)
+            if automation.busy { Button("取消操作") {automation.cancel()}.buttonStyle(.bordered).tint(.white) }
             if let feedback=feishuFeedback {
                 Text(feedback).font(.system(size:13)).foregroundStyle(.white).multilineTextAlignment(.center)
             }
@@ -312,15 +314,19 @@ struct RootView: View {
             }
             .overlay(RoundedRectangle(cornerRadius:24).stroke(LinearGradient(colors:[.white.opacity(0.65),.white.opacity(0.12)],startPoint:.topLeading,endPoint:.bottomTrailing),lineWidth:1))
             .shadow(color:Color.blue.opacity(0.28),radius:24,y:12)
-            .allowsHitTesting(false).accessibilityElement(children:.combine)
+            .accessibilityElement(children:automation.busy ? .contain : .combine)
     }
-    func copy() {
-        guard !showsShortcutSettings else { return }
+    func copy() {performCopy(forward:true)}
+    func copyOnly() {performCopy(forward:false)}
+    func performCopy(forward:Bool) {
+        let shouldForward=forward && automation.configuration.enabled
+        guard !showsShortcutSettings && !automation.busy else { return }
         editorFocus.commitComposition()
         model.activate()
         guard model.entry.day == ReminderRules.day(Date()) else { model.problem = "当天记录尚未加载，复制已暂停，请先解决保存错误。"; return }
         let snapshot=model.entry
-        model.flush()
+        if shouldForward && [snapshot.tasks,snapshot.progress,snapshot.blockers].allSatisfy({$0.trimmingCharacters(in:.whitespacesAndNewlines).isEmpty}) {model.problem="请先填写 Todo，再转发。";return}
+        guard model.flush() else {return}
         flashTask?.cancel()
         if model.page == "today" && !reduceMotion {
             copyFlash=true
@@ -334,21 +340,29 @@ struct RootView: View {
         if pasteboard.setString(CopyFormatter.text(snapshot),forType:.string) {
             services.recordCopiedToday()
             feishuFeedback=nil
-            if openFeishuAfterCopy {
-                FeishuLauncher.open { feishuFeedback=$0 }
-            }
+            copyToastTitle="已复制到剪贴板"
             toastTask?.cancel(); copied = true
             toastMessage = copyMessagesEnabled ? messagePicker.next() : nil
             if let message = toastMessage { Runtime.defaults.set(message,forKey:"lastCopyMessage") }
             withAnimation(.easeOut(duration:reduceMotion ? CopyFeedbackTiming.reducedEnter : CopyFeedbackTiming.enter)) { toastVisible = true }
-            toastTask = Task { @MainActor in
-                do { try await Task.sleep(nanoseconds:UInt64(CopyFeedbackTiming.dismissDelay(reduceMotion:reduceMotion)*1_000_000_000)) } catch { return }
-                guard !Task.isCancelled else { return }
-                withAnimation(.easeInOut(duration:CopyFeedbackTiming.fade)) { toastVisible = false; copied = false }
-            }
+            if shouldForward {
+                automation.forward(text:CopyFormatter.text(snapshot),day:snapshot.day) {outcome in
+                    copyToastTitle=outcome.title;feishuFeedback=outcome.detail
+                    dismissFeedbackLater()
+                }
+            } else {dismissFeedbackLater()}
         } else {
             toastTask?.cancel(); toastVisible = false; copied = false
             model.problem = "写入剪贴板失败，请重试。未复制成功。"
         }
     }
+    func dismissFeedbackLater() {
+        toastTask?.cancel()
+        toastTask=Task { @MainActor in
+            do {try await Task.sleep(nanoseconds:UInt64(CopyFeedbackTiming.dismissDelay(reduceMotion:reduceMotion)*1_000_000_000))}catch{return}
+            guard !Task.isCancelled else{return}
+            withAnimation(.easeInOut(duration:CopyFeedbackTiming.fade)) {toastVisible=false;copied=false}
+        }
+    }
+
 }
