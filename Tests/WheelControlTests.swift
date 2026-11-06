@@ -18,6 +18,16 @@ enum WheelControlTests {
         _ = NSApplication.shared
         let wheel = WheelControl(frame: NSRect(x:0,y:0,width:125,height:172))
         wheel.updateFromBinding(20,presetRevision:0)
+        func waitForSnap() async throws {
+            // Shared CI runners may resume animation frames late. Check the
+            // finished state, while retaining a deadline and exact value checks.
+            let deadline = ProcessInfo.processInfo.systemUptime + 3
+            while wheel.input.isHidden && ProcessInfo.processInfo.systemUptime < deadline {
+                try await Task.sleep(nanoseconds:10_000_000)
+            }
+            precondition(!wheel.input.isHidden,
+                         "Snap did not finish within 3 seconds; value=\(wheel.value)")
+        }
         func scroll(_ rows:CGFloat, _ phase:NSEvent.Phase = .changed,
                     momentum:NSEvent.Phase = []) {
             let event = WheelScrollFixture()
@@ -38,7 +48,7 @@ enum WheelControlTests {
         scroll(1,momentum:.changed)
         for _ in 0..<20 { scroll(1,momentum:.changed) }
         scroll(0,momentum:.ended)
-        try await Task.sleep(nanoseconds:250_000_000)
+        try await waitForSnap()
         precondition(wheel.value == 24 && !wheel.input.isHidden,
                      "Coasting must be bounded and finish on an integer")
 
@@ -59,7 +69,7 @@ enum WheelControlTests {
         scroll(1)
         precondition(wheel.value == 0)
         scroll(0,.ended)
-        try await Task.sleep(nanoseconds:250_000_000)
+        try await waitForSnap()
         precondition(!wheel.input.isHidden)
         print("PASS: held gesture, bounded coast, snap, preset interruption, reduced motion, boundary")
     }
