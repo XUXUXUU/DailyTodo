@@ -6,11 +6,11 @@ on:
 permissions:
   contents: write
 concurrency:
-  group: release-${{ github.ref }}
+  group: release
   cancel-in-progress: false
 jobs:
   release:
-    runs-on: macos-14
+    runs-on: macos-15
     steps:
       - uses: actions/checkout@v7
         with:
@@ -46,4 +46,4 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: |
           version=$(/usr/libexec/PlistBuddy -c 'Print CFBundleShortVersionString' Info.plist)
-          gh release create "v$version" "dist/DailyTodo-$version.zip" "dist/DailyTodo-$version.dmg" dist/appcast.xml dist/SHA256SUMS --verify-tag --title "Daily Todo $version" --notes-file "release-notes/$version.md" --latest
+          gh release create "v$version" "dist/DailyTodo-$version.zip" "dist/DailyTodo-$version.dmg" dist/appcast.xml dist/SHA256SUMS --verify-tag --title "Daily Todo $version" --notes-file "release-notes/$version.md"
