@@ -35,7 +35,7 @@ struct AutomationSettingsCard:View {
                 Button(trusted ? "系统设置" : "前往授权") {automation.requestPermission();trusted=automation.trusted}.buttonStyle(.bordered)
             }
             if !trusted {Text("如果系统列表已开启但这里仍未允许，请移除本应用后重新添加，再重启应用。").font(.caption).foregroundStyle(.secondary)}
-            Text("用于操作飞书聊天。未登录、对象不明确或已有草稿时会停止，Todo 仍会复制到剪贴板。")
+            Text("转发会使用剪贴板，请勿同时复制或切换聊天。未登录、对象不明确或已有草稿时会停止，Todo 仍会复制到剪贴板。")
                 .font(.caption).foregroundStyle(.secondary).fixedSize(horizontal:false,vertical:true)
             if let error {Text(error).font(.caption).foregroundStyle(.orange).fixedSize(horizontal:false,vertical:true)}
             HStack {

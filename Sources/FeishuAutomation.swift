@@ -48,6 +48,18 @@ struct FeishuAutomationOutcome {
                         else {continuation.resume(throwing:error ?? FeishuAutomationError.message("无法启动飞书。"))}
                     }
                 }
+                let startupDeadline=ProcessInfo.processInfo.systemUptime+15
+                while !app.isFinishedLaunching && ProcessInfo.processInfo.systemUptime < startupDeadline {
+                    try Task.checkCancellation();try await Task.sleep(nanoseconds:100_000_000)
+                }
+                _ = app.activate(options:.activateIgnoringOtherApps)
+                var activeSamples=0
+                while activeSamples < 3 && ProcessInfo.processInfo.systemUptime < startupDeadline {
+                    try Task.checkCancellation()
+                    activeSamples=app.isActive ? activeSamples+1 : 0
+                    try await Task.sleep(nanoseconds:100_000_000)
+                }
+                guard activeSamples==3 else {throw FeishuAutomationError.message("飞书未能进入前台，请确认已登录后重试。")}
                 try Task.checkCancellation()
                 let worker=Task.detached(priority:.userInitiated) {
                     let session=FeishuAXSession(pid:app.processIdentifier)
@@ -102,7 +114,11 @@ private final class FeishuAXNode {
 private final class FeishuAXSession:@unchecked Sendable {
     let app:AXUIElement
     let pid:pid_t
-    init(pid:pid_t) {self.pid=pid;app=AXUIElementCreateApplication(pid);AXUIElementSetMessagingTimeout(app,0.4)}
+    init(pid:pid_t) {
+        self.pid=pid;app=AXUIElementCreateApplication(pid);AXUIElementSetMessagingTimeout(app,0.4)
+        _ = AXUIElementSetAttributeValue(app,"AXEnhancedUserInterface" as CFString,kCFBooleanTrue)
+        _ = AXUIElementSetAttributeValue(app,"AXManualAccessibility" as CFString,kCFBooleanTrue)
+    }
     private func fail(_ message:String)throws ->Never {throw FeishuAutomationError.message(message)}
     private func check()throws {
         try Task.checkCancellation()
@@ -115,7 +131,6 @@ private final class FeishuAXSession:@unchecked Sendable {
     }
     private func tree()throws ->FeishuAXNode {
         try check()
-        _ = AXUIElementSetAttributeValue(app,"AXManualAccessibility" as CFString,kCFBooleanTrue)
         let window:AXUIElement
         if let value=attribute(app,kAXFocusedWindowAttribute),CFGetTypeID(value)==AXUIElementGetTypeID() {window=unsafeBitCast(value,to:AXUIElement.self)}
         else if let windows=attribute(app,kAXWindowsAttribute) as? [AXUIElement],let first=windows.first {window=first}
@@ -139,17 +154,20 @@ private final class FeishuAXSession:@unchecked Sendable {
         } while ProcessInfo.processInfo.systemUptime < end
         try fail(message)
     }
-    private func click(_ node:FeishuAXNode)throws {
+    private func click(_ node:FeishuAXNode,forceMouse:Bool=false)throws {
         try check()
-        if AXUIElementPerformAction(node.element,kAXPressAction as CFString) == .success {return}
+        if !forceMouse && AXUIElementPerformAction(node.element,kAXPressAction as CFString) == .success {return}
         guard let position=attribute(node.element,kAXPositionAttribute),let size=attribute(node.element,kAXSizeAttribute),
               CFGetTypeID(position)==AXValueGetTypeID(),CFGetTypeID(size)==AXValueGetTypeID() else {try fail("飞书控件暂不支持自动操作，请手动选择会话。")}
         var point=CGPoint.zero;var bounds=CGSize.zero
         guard AXValueGetValue(unsafeBitCast(position,to:AXValue.self),.cgPoint,&point),AXValueGetValue(unsafeBitCast(size,to:AXValue.self),.cgSize,&bounds),bounds.width>0,bounds.height>0 else {try fail("无法定位飞书控件。")}
         point.x += bounds.width/2;point.y += bounds.height/2
+        var hit:AXUIElement?;var hitPID:pid_t=0
+        guard AXUIElementCopyElementAtPosition(AXUIElementCreateSystemWide(),Float(point.x),Float(point.y),&hit) == .success,
+              let hit,AXUIElementGetPid(hit,&hitPID) == .success,hitPID==pid else {try fail("飞书控件被其他窗口遮挡，已停止操作。")}
         for type in [CGEventType.leftMouseDown,.leftMouseUp] {
             guard let event=CGEvent(mouseEventSource:nil,mouseType:type,mouseCursorPosition:point,mouseButton:.left) else {try fail("无法操作飞书控件。")}
-            event.postToPid(pid)
+            event.post(tap:.cghidEventTap)
         }
     }
     private func key(_ code:CGKeyCode,flags:CGEventFlags=[])throws {
@@ -160,7 +178,7 @@ private final class FeishuAXSession:@unchecked Sendable {
         }
     }
     private func focus(_ node:FeishuAXNode) async throws {
-        try check();try click(node)
+        try check();try click(node,forceMouse:true)
         _ = AXUIElementSetAttributeValue(node.element,kAXFocusedAttribute as CFString,kCFBooleanTrue)
         let end=ProcessInfo.processInfo.systemUptime+2
         repeat {
@@ -187,8 +205,11 @@ private final class FeishuAXSession:@unchecked Sendable {
     private func chatWeb(_ root:FeishuAXNode)->FeishuAXNode? {root.all.first{$0.role=="AXWebArea" && ($0.url.contains("/messenger/messenger-chat/") || $0.label=="messenger-chat")}}
     private func hasEditableText(_ node:FeishuAXNode)->Bool {
         for child in node.children.flatMap(\.all) where child.role==kAXStaticTextRole {
+            if FeishuAutomationRules.normalized(child.text).isEmpty {if !child.valueReadable {return true};continue}
             var editable=DarwinBoolean(false)
             let result=AXUIElementIsAttributeSettable(child.element,kAXValueAttribute as CFString,&editable)
+            Runtime.report("feishu-text-editability",payload:["error":result.rawValue,"editable":editable.boolValue,"meaningfulLength":FeishuAutomationRules.normalized(child.text).count])
+            if result == .attributeUnsupported {continue}
             if result != .success || editable.boolValue {return true}
         }
         return false
@@ -206,10 +227,25 @@ private final class FeishuAXSession:@unchecked Sendable {
         guard chat.staticTexts.first.map({FeishuAutomationRules.normalized($0)})==config.recipient,editors.count==1 else {return nil}
         return editors[0]
     }
-    private func liveEditor(_ expected:FeishuAXNode,config:FeishuAutomationConfiguration,expectedText:String?)throws ->FeishuAXNode {
+    private func layoutSignature(_ chat:FeishuAXNode,editor:FeishuAXNode)->String {
+        guard let parent=chat.all.first(where:{$0.children.contains(where:{CFEqual($0.element,editor.element)})}) else {return "missing"}
+        func layout(_ node:FeishuAXNode)->String {
+            if CFEqual(node.element,editor.element) {return "editor"}
+            let own=node.children.isEmpty ? [node.role,node.label,node.value].joined(separator:"\u{1f}") : node.role
+            return own+"["+node.children.map(layout).joined(separator:"\u{1e}")+"]"
+        }
+        return FeishuDeliveryLedger.fingerprint(recipient:"layout",day:"",text:layout(parent))
+    }
+    private func containsAttachments(_ chat:FeishuAXNode,editor:FeishuAXNode)->Bool {
+        if editor.children.flatMap(\.all).contains(where:{[kAXImageRole,kAXButtonRole,"AXLink"].contains($0.role)}) {return true}
+        let parent=chat.all.first(where:{$0.children.contains(where:{CFEqual($0.element,editor.element)})})
+        return parent?.all.contains(where:{$0.role==kAXButtonRole && ["移除附件","删除附件","取消上传"].contains($0.label)}) == true
+    }
+    private func liveEditor(_ expected:FeishuAXNode,config:FeishuAutomationConfiguration,expectedText:String?,expectedLayout:String)throws ->FeishuAXNode {
         let root=try tree()
         guard searchWeb(root)==nil,let chat=chatWeb(root),let editor=composer(chat,config:config),CFEqual(editor.element,expected.element),
               let focused=attribute(app,kAXFocusedUIElementAttribute),CFEqual(focused,editor.element) else {try fail("聊天对象或输入焦点已改变，已停止操作。")}
+        guard !containsAttachments(chat,editor:editor),layoutSignature(chat,editor:editor)==expectedLayout else {try fail("聊天或待发送附件发生变化，已停止操作并保留草稿。")}
         // This read is deliberately after tree traversal and all waiting/locking.
         let live=FeishuAXNode(editor.element)
         guard live.valueReadable else {try fail("无法读取飞书草稿，已停止操作并保留原文。场景暂不支持自动化。") }
@@ -260,16 +296,25 @@ private final class FeishuAXSession:@unchecked Sendable {
         // Composer sibling attachments also belong to an existing draft.
         let draftArea=pair.0.all.first(where:{$0.children.contains(where:{$0 === pair.1})})
         if let draftArea,draftArea.all.contains(where:{$0.role==kAXButtonRole && ["移除附件","删除附件","取消上传"].contains($0.label)}) {try fail("聊天中已有待发送附件，请先处理后重试。")}
-        let before=FeishuAutomationRules.compact(pair.0.staticTexts.joined(separator:"\n"))
+        let expectedLayout=layoutSignature(pair.0,editor:pair.1)
         progress("正在填写消息…")
         try await focus(pair.1)
-        let clipboardUnchanged=await MainActor.run {
-            NSPasteboard.general.changeCount==clipboardGeneration && NSPasteboard.general.string(forType:.string)==text
+        try await MainActor.run {
+            let board=NSPasteboard.general
+            _ = try self.liveEditor(pair.1,config:config,expectedText:nil,expectedLayout:expectedLayout)
+            // The click owns this immutable Todo snapshot. Refresh only at the
+            // final paste step, after all navigation and blocking AX reads.
+            board.clearContents()
+            guard board.setString(text,forType:.string) else {try self.fail("无法将本次 Todo 写入剪贴板，已停止填写。")}
+            let pasteGeneration=board.changeCount
+            Runtime.report("feishu-clipboard-state",payload:["generationChanged":pasteGeneration != clipboardGeneration,"textMatches":board.string(forType:.string)==text])
+            try self.check()
+            guard let focused=self.attribute(self.app,kAXFocusedUIElementAttribute),CFEqual(focused,pair.1.element),
+                  let value=self.attribute(pair.1.element,kAXValueAttribute) as? String,
+                  FeishuAutomationRules.isEmptyComposer(value,name:config.recipient,isSelf:config.recipientIsSelf,readable:true,editableText:self.hasEditableText(pair.1)) else {try self.fail("输入焦点或草稿已改变，已取消填写。")}
+            guard board.changeCount==pasteGeneration,board.string(forType:.string)==text else {try self.fail("粘贴前剪贴板已改变，已停止操作。")}
+            try self.key(9,flags:.maskCommand)
         }
-        guard clipboardUnchanged else {try fail("剪贴板已被其他操作改变，已停止填写，请重新点击转发。")}
-        _ = try liveEditor(pair.1,config:config,expectedText:nil)
-        try check()
-        try key(9,flags:.maskCommand)
 
         let filled:(FeishuAXNode,FeishuAXNode)=try await wait("飞书未能确认完整正文，请检查草稿并手动粘贴。",seconds:5) {root in
             guard let chat=self.chatWeb(root),let editor=self.composer(chat,config:config),FeishuAutomationRules.normalized(editor.value)==FeishuAutomationRules.normalized(text) else {return nil}
@@ -281,22 +326,21 @@ private final class FeishuAXSession:@unchecked Sendable {
         guard FeishuAutomationRules.normalized(FeishuAXNode(filled.1.element).value)==FeishuAutomationRules.normalized(text) else {try fail("草稿已被修改，已取消自动发送。")}
         guard try ledger.claim(fingerprint) else {try fail("这份内容已发送或上次发送结果未确认。请先检查飞书，系统不会重复发送。")}
         progress("正在发送并核对结果…")
+        var dispatched=false
         do {
-            _ = try liveEditor(filled.1,config:config,expectedText:text)
-            try key(36)
-            let _:Bool=try await wait("发送结果未确认，请检查飞书聊天。系统不会自动重发。",seconds:10) {root in
+            _ = try liveEditor(filled.1,config:config,expectedText:text,expectedLayout:expectedLayout)
+            try key(36);dispatched=true
+            let _:Bool=try await wait("发送结果未确认，请检查飞书聊天。系统不会自动重发。",seconds:8) {root in
                 guard let chat=self.chatWeb(root),let editor=self.composer(chat,config:config),self.emptyComposer(editor,config:config) else {return nil}
-                let after=FeishuAutomationRules.compact(chat.staticTexts.joined(separator:"\n"))
-                let needle=FeishuAutomationRules.compact(text)
-                let previous=before.components(separatedBy:needle).count
-                return after.components(separatedBy:needle).count > previous ? true : nil
+                return true
             }
-            // An outgoing local bubble is a submission, not a server receipt.
+            // A cleared composer confirms the UI action, not server delivery.
             try ledger.finish(fingerprint,sent:false)
         } catch {
             try? ledger.finish(fingerprint,sent:false)
+            if dispatched {return FeishuAutomationOutcome(title:"已执行发送操作",detail:"最终状态未确认，请检查飞书聊天；系统不会自动重发。",successful:false)}
             throw error
         }
-        return FeishuAutomationOutcome(title:"已交给飞书发送",detail:"收件人：\(config.recipient)。请以飞书中的最终发送状态为准；系统不会自动重发。",successful:true)
+        return FeishuAutomationOutcome(title:"已执行发送操作",detail:"收件人：\(config.recipient)。请以飞书中的最终发送状态为准；系统不会自动重发。",successful:true)
     }
 }
