@@ -46,4 +46,6 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: |
           version=$(/usr/libexec/PlistBuddy -c 'Print CFBundleShortVersionString' Info.plist)
-          gh release create "v$version" "dist/DailyTodo-$version.zip" "dist/DailyTodo-$version.dmg" dist/appcast.xml dist/SHA256SUMS --verify-tag --title "Daily Todo $version" --notes-file "release-notes/$version.md"
+          gh api --paginate "repos/$GITHUB_REPOSITORY/releases" --jq '.[] | select(.draft == false and .prerelease == false) | .tag_name' > "$RUNNER_TEMP/published-tags"
+          latest=$(python3 -c 'import re,sys; parse=lambda s: tuple(map(int,s.removeprefix("v").split("."))); current=parse(sys.argv[1]); tags=[parse(s) for s in open(sys.argv[2]).read().splitlines() if re.fullmatch(r"v?\d+\.\d+\.\d+",s)]; print(str(not any(tag > current for tag in tags)).lower())' "$version" "$RUNNER_TEMP/published-tags")
+          gh release create "v$version" "dist/DailyTodo-$version.zip" "dist/DailyTodo-$version.dmg" dist/appcast.xml dist/SHA256SUMS --verify-tag --title "Daily Todo $version" --notes-file "release-notes/$version.md" --latest="$latest"
