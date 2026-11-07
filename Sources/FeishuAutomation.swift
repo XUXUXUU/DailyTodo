@@ -16,32 +16,33 @@ struct FeishuAutomationOutcome {
     @Published private(set) var detectedSelfName:String?
     private var task:Task<Void,Never>?
     var effectiveConfiguration:FeishuAutomationConfiguration {configuration.productionSafe}
-    var trusted:Bool {AXIsProcessTrusted()}
+    var trusted:Bool {AccessibilityPermission.shared.ready}
     func save(_ value:FeishuAutomationConfiguration)throws {
         guard !busy else {throw FeishuAutomationError.message("正在转发，请先取消当前操作再修改。")};guard !value.enabled || trusted else {throw FeishuAutomationError.message("请先开启辅助功能。")};try value.productionSafe.save(to:Runtime.defaults);configuration=FeishuAutomationConfiguration.load(from:Runtime.defaults).productionSafe
     }
-    func requestPermission() {
-        openPermissions();AccessibilityGuide.shared.show()
+    func requestPermission(repair:Bool=false) {
+        AccessibilityPermission.shared.hasOpenedSettings=true
+        openPermissions();AccessibilityGuide.shared.show(repair:repair)
     }
     func openPermissions() {
         if let url=URL(string:"x-apple.systempreferences:com.apple.preference.security?Privacy_Accessibility") {NSWorkspace.shared.open(url)}
     }
     func cancel() {task?.cancel()}
     func testSelf() {
-        begin(text:"Daily Todo 转发测试\n这是一条发给自己的测试消息。",day:ReminderRules.day(Date()),selfTest:true,confirmed:true) {_ in}
+        begin(text:"Daily Todo 转发测试\n这是一条发给自己的测试消息。",day:ReminderRules.day(Date()),selfTest:true) {_ in}
     }
-    func forward(text:String,day:String,confirmed:Bool=false,completion:@escaping (FeishuAutomationOutcome)->Void) {
-        begin(text:text,day:day,selfTest:false,confirmed:confirmed,completion:completion)
+    func forward(text:String,day:String,completion:@escaping (FeishuAutomationOutcome)->Void) {
+        begin(text:text,day:day,selfTest:false,completion:completion)
     }
-    private func begin(text:String,day:String,selfTest:Bool,confirmed:Bool,completion:@escaping (FeishuAutomationOutcome)->Void) {
+    private func begin(text:String,day:String,selfTest:Bool,completion:@escaping (FeishuAutomationOutcome)->Void) {
         guard !busy else{return}
         let testingSelf=selfTest || Runtime.sessionID != nil
         let original=effectiveConfiguration
-        guard original.canDispatch(confirmed:confirmed,selfTest:selfTest) else {
-            completion(FeishuAutomationOutcome(title:"请先确认发送",detail:nil,successful:false));return
+        guard original.canDispatch(selfTest:selfTest) else {
+            completion(FeishuAutomationOutcome(title:"请先开启一键转发",detail:nil,successful:false));return
         }
         var config=original
-        config.mode = .send
+        config.mode=original.deliveryMode(selfTest:selfTest)
         if testingSelf {config.recipient="";config.recipientIsSelf=true;testResult=nil;detectedSelfName=nil}
         let deliveryConfiguration=config
         let clipboardGeneration=NSPasteboard.general.changeCount
@@ -49,6 +50,7 @@ struct FeishuAutomationOutcome {
         task=Task {
             let outcome:FeishuAutomationOutcome
             do {
+                await AccessibilityPermission.shared.refresh()
                 guard trusted else {throw FeishuAutomationError.message("请先在一键转发设置中开启辅助功能。")}
                 guard let url=NSWorkspace.shared.urlForApplication(withBundleIdentifier:"com.electron.lark") else {throw FeishuAutomationError.message("未找到飞书，请先安装飞书。")}
                 let app=try await withCheckedThrowingContinuation { (continuation:CheckedContinuation<NSRunningApplication,Error>) in
@@ -89,7 +91,7 @@ struct FeishuAutomationOutcome {
                 outcome=FeishuAutomationOutcome(title:testingSelf ? "测试未完成" : "转发未完成",detail:error is CancellationError ? "操作已取消，请检查飞书草稿。不会自动重发。" : error.localizedDescription,successful:false)
             }
             busy=false;lastResult=outcome.detail ?? outcome.title
-            if testingSelf {testResult=outcome.successful ? "已向\(detectedSelfName ?? "自己")执行测试发送" : (outcome.detail ?? outcome.title)}
+            if testingSelf {testResult=outcome.successful && config.mode == .draft ? "已填入自己的聊天框，尚未发送" : outcome.successful ? "已向\(detectedSelfName ?? "自己")执行测试发送" : (outcome.detail ?? outcome.title)}
             Runtime.report("feishu-automation",payload:["successful":outcome.successful,"title":outcome.title,"detail":outcome.detail ?? "","recipient":detectedSelfName ?? config.recipient,"mode":config.mode.rawValue])
             completion(outcome)
         }
@@ -141,7 +143,7 @@ private final class FeishuAXSession:@unchecked Sendable {
     private func check()throws {
         try Task.checkCancellation()
         guard AXIsProcessTrusted() else {try fail("辅助功能权限已失效，已停止操作。")}
-        guard NSWorkspace.shared.frontmostApplication?.processIdentifier == pid else {try fail("飞书已不在前台，操作已暂停。正文仍在剪贴板，请回到飞书检查后重试。")}
+        guard NSWorkspace.shared.frontmostApplication?.processIdentifier == pid else {try fail("飞书已不在前台，操作已暂停。请回到飞书检查后重试。")}
     }
     private func attribute(_ element:AXUIElement,_ key:String)->CFTypeRef? {
         var value:CFTypeRef?
@@ -206,18 +208,49 @@ private final class FeishuAXSession:@unchecked Sendable {
         } while ProcessInfo.processInfo.systemUptime < end
         try fail("飞书输入焦点发生变化，已停止操作。")
     }
-    private func typeSearchName(_ text:String,in node:FeishuAXNode) async throws {
+    private func typeSearchName(_ name:String,in node:FeishuAXNode,restoring body:String) async throws {
         try await focus(node)
-        try key(0,flags:.maskCommand)
-        try check()
-        guard let focused=attribute(app,kAXFocusedUIElementAttribute),CFEqual(focused,node.element) else {try fail("搜索焦点已改变，已停止查找。")}
-        let characters=Array(text.utf16)
-        for down in [true,false] {
-            guard let event=CGEvent(keyboardEventSource:nil,virtualKey:0,keyDown:down) else {try fail("无法输入联系人姓名。")}
-            event.flags=[]
-            characters.withUnsafeBufferPointer {event.keyboardSetUnicodeString(stringLength:characters.count,unicodeString:$0.baseAddress!)}
-            event.postToPid(pid)
+        let live=FeishuAXNode(node.element)
+        guard live.valueReadable else {try fail("无法读取搜索框，已停止查找。")}
+        if FeishuAutomationRules.normalized(live.value)==name {return}
+        if !FeishuAutomationRules.normalized(live.value).isEmpty {
+            let clear=searchWeb(try tree())?.all.filter {$0.role==kAXButtonRole && $0.label=="清除"} ?? []
+            guard clear.count==1 else {try fail("无法安全清除旧搜索，请手动清空飞书搜索后重试。")}
+            try click(clear[0],forceMouse:true)
+            let _:Bool=try await wait("飞书未能清空旧搜索，已停止查找。",seconds:3) {root in
+                self.searchWeb(root)?.all.contains(where:{$0.isEditor && CFEqual($0.element,node.element) && $0.valueReadable && FeishuAutomationRules.normalized($0.value).isEmpty}) == true ? true:nil
+            }
+            try await focus(node)
         }
+        let generation=try await MainActor.run { () throws ->Int in
+            try self.check()
+            guard let focused=self.attribute(self.app,kAXFocusedUIElementAttribute),CFEqual(focused,node.element),
+                  FeishuAXNode(node.element).valueReadable,FeishuAutomationRules.normalized(FeishuAXNode(node.element).value).isEmpty else {
+                try self.fail("搜索焦点或文字已改变，已停止查找。")
+            }
+            let board=NSPasteboard.general;board.clearContents()
+            guard board.setString(name,forType:.string) else {try self.fail("无法准备联系人搜索文字。")}
+            return board.changeCount
+        }
+        func restoreBody() async ->Bool {
+            await MainActor.run {
+                let board=NSPasteboard.general
+                guard board.changeCount==generation,board.string(forType:.string)==name else {return false}
+                board.clearContents();return board.setString(body,forType:.string)
+            }
+        }
+        do {
+            try await MainActor.run {
+                let board=NSPasteboard.general
+                guard board.changeCount==generation,board.string(forType:.string)==name else {try self.fail("剪贴板已变化，已暂停操作，请重新转发。")}
+                guard let focused=self.attribute(self.app,kAXFocusedUIElementAttribute),CFEqual(focused,node.element) else {try self.fail("搜索焦点已改变，已停止查找。")}
+                try self.key(9,flags:.maskCommand)
+            }
+            let _:Bool=try await wait("飞书未能接收联系人姓名，已停止查找。",seconds:5) {root in
+                self.searchWeb(root)?.all.contains(where:{$0.isEditor && CFEqual($0.element,node.element) && FeishuAutomationRules.normalized($0.value)==name}) == true ? true:nil
+            }
+        } catch {_ = await restoreBody();throw error}
+        guard await restoreBody() else {try fail("剪贴板已变化，已暂停操作，请重新转发。")}
     }
     private func searchWeb(_ root:FeishuAXNode)->FeishuAXNode? {root.all.first{$0.role=="AXWebArea" && ($0.url.contains("/search/search-command-bar/") || $0.label=="search-command-bar")}}
     private func chatWeb(_ root:FeishuAXNode)->FeishuAXNode? {root.all.first{$0.role=="AXWebArea" && ($0.url.contains("/messenger/messenger-chat/") || $0.label=="messenger-chat")}}
@@ -275,6 +308,16 @@ private final class FeishuAXSession:@unchecked Sendable {
         return live
     }
     func discoverSelf() async throws ->String {
+        func accountCard(_ root:FeishuAXNode)->Bool {
+            root.all.contains{$0.role=="AXWebArea" && ($0.label=="ternantCardModal" || $0.url.contains("/main-window/ternantCardModal/"))}
+        }
+        let initial=try tree()
+        if searchWeb(initial) != nil || accountCard(initial) {
+            try key(53)
+            let _:Bool=try await wait("请先关闭飞书搜索或账号卡片后重试。") {root in
+                self.searchWeb(root)==nil && !accountCard(root) ? true:nil
+            }
+        }
         let root:FeishuAXNode=try await wait("请先登录飞书后重试。",seconds:25) {root in
             root.all.contains(where:{$0.role==kAXButtonRole && $0.label=="我的头像"}) ? root : nil
         }
@@ -316,14 +359,16 @@ private final class FeishuAXSession:@unchecked Sendable {
         guard search.count==1 else {try fail("无法识别飞书搜索入口，请确认已登录。")}
         try click(search[0])
         let input:FeishuAXNode=try await wait("无法定位联系人搜索框。") {self.searchWeb($0)?.all.first(where:{$0.isEditor})}
-        try await typeSearchName(config.recipient,in:input)
+        try await typeSearchName(config.recipient,in:input,restoring:text)
         let _:Bool=try await wait("飞书未能接收联系人姓名，请手动查找。",seconds:5) {root in
             self.searchWeb(root)?.all.contains(where:{$0.isEditor && FeishuAutomationRules.normalized($0.value)==config.recipient}) == true ? true : nil
         }
-        let filter:FeishuAXNode=try await wait("无法识别联系人筛选，请手动选择。") {root in
-            self.searchWeb(root)?.all.first{$0.role==kAXButtonRole && $0.label=="联系人"}
+        if searchWeb(try tree())?.staticTexts.first != "联系人" {
+            let filter:FeishuAXNode=try await wait("无法识别联系人筛选，请手动选择。") {root in
+                self.searchWeb(root)?.all.first{$0.role==kAXButtonRole && $0.label=="联系人"}
+            }
+            try click(filter)
         }
-        try click(filter)
         let person:FeishuAXNode=try await wait("未找到唯一联系人，请核对姓名后重试。") {root in
             guard let web=self.searchWeb(root),web.staticTexts.first=="联系人",!web.all.contains(where:{$0.text=="加载中"}) else {return nil}
             let people=web.outsideEditors.filter{$0.role==kAXStaticTextRole && FeishuAutomationRules.normalized($0.text)==config.recipient}
@@ -368,6 +413,9 @@ private final class FeishuAXSession:@unchecked Sendable {
         let filled:(FeishuAXNode,FeishuAXNode)=try await wait("飞书未能确认完整正文，请检查草稿并手动粘贴。",seconds:5) {root in
             guard let chat=self.chatWeb(root),let editor=self.composer(chat,config:config),FeishuAutomationRules.normalized(editor.value)==FeishuAutomationRules.normalized(text) else {return nil}
             return (chat,editor)
+        }
+        if config.mode == .draft {
+            return FeishuAutomationOutcome(title:"已填入聊天框",detail:"尚未发送，请在飞书检查后发送。",successful:true)
         }
         guard filled.0.staticTexts.contains(where:{FeishuAutomationRules.canSendUsingReturn(hint:$0)}) else {try fail("无法确认飞书发送键，已保留草稿，请在飞书中手动发送。")}
         try await focus(filled.1)

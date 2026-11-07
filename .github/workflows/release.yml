@@ -29,6 +29,7 @@ jobs:
           scripts/test-editor-model.sh
           scripts/test-feishu.sh
           scripts/test-accessibility-guide.sh
+          scripts/test-accessibility-permission.sh
           scripts/test-menus.sh
           scripts/test-wheel-motion.sh
       - name: Build universal application

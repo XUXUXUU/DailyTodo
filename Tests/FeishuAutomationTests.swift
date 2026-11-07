@@ -25,7 +25,7 @@ import Foundation
         check(official.productionSafe.enabled && official.productionSafe.recipient == "何雪瑶","正式收件人固定且保留有效开关")
         official.recipientIsSelf=true
         check(!official.productionSafe.enabled,"旧本人测试不能迁移为正式发送")
-        check(FeishuDeliveryMode.draft.title == "确认后发送","旧草稿模式改为先确认后发送")
+        check(FeishuDeliveryMode.draft.title == "填入聊天框","只填写模式名称必须准确")
         check(FeishuAutomationRules.selfName(profileTexts:[]) == nil,"账号卡片内容未加载时必须继续等待")
         check(FeishuAutomationRules.selfName(profileTexts:["安龙","润泽园教育","我的个人名片 我的二维码与链接","设置 退出登录"]) == "安龙","从当前飞书账号卡片识别姓名")
         check(FeishuAutomationRules.selfName(profileTexts:["何雪瑶","消息","发送给何雪瑶"]) == nil,"普通聊天不可当作本人身份")
@@ -34,11 +34,12 @@ import Foundation
         check(!FeishuAutomationRules.isVerifiedSelfComposer("发送给安龙",editableText:false),"同名他人的聊天不能冒充本人")
         check(!FeishuAutomationRules.isVerifiedSelfComposer("可以向自己发送文件或转发消息",editableText:true),"真实草稿不能冒充本人空输入区")
         var approval=FeishuAutomationConfiguration();approval.enabled=true
-        check(!approval.canDispatch(confirmed:false,selfTest:false),"默认模式未确认不得执行发送")
-        check(approval.canDispatch(confirmed:true,selfTest:false),"确认后才允许正式发送")
+        check(approval.canDispatch(selfTest:false),"开启后可以填写聊天框，无需应用内二次确认")
+        check(approval.deliveryMode(selfTest:false) == .draft,"普通转发保持只填写，不能暗中升级自动发送")
+        check(approval.deliveryMode(selfTest:true) == .send,"显式本人测试发送固定示例，不改变正式模式")
         approval.enabled=false
-        check(!approval.canDispatch(confirmed:true,selfTest:false),"关闭功能即使确认也不可发送")
-        check(approval.canDispatch(confirmed:false,selfTest:true),"显式本人测试不依赖正式开关")
+        check(!approval.canDispatch(selfTest:false),"关闭功能不可操作飞书")
+        check(approval.canDispatch(selfTest:true),"显式本人测试不依赖正式开关")
         check(!FeishuAutomationRules.isEmptyComposer("发送给安龙",name:"安龙",isSelf:true,readable:true,editableText:false),"最终粘贴前仍拒绝同名他人输入区")
         check(!FeishuAutomationRules.isEmptyComposer("",name:"安龙",isSelf:true,readable:true,editableText:false),"最终粘贴前没有本人标记必须停止")
         check(FeishuAutomationRules.selfName(profileTexts:["润泽园教育","已认证","我的个人名片","退出登录"]) == nil,"组织名先加载时不得当作本人姓名")

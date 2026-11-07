@@ -41,7 +41,8 @@ struct RootView: View {
     let pageChanged:(String)->Void
     @StateObject private var editorFocus=EditorFocus()
     @StateObject private var automation=FeishuAutomationController()
-    @State private var pendingForward:Entry?
+    @State private var showsForwardingSetup=false
+    @State private var permissionRestarting=false
     @State private var feedbackSucceeded=true
     @State private var copyToastTitle="已复制到剪贴板"
     @State private var copyHovered=false
@@ -116,19 +117,20 @@ struct RootView: View {
                 }
             }
         }
-        .sheet(item:$pendingForward) {entry in
-            VStack(spacing:18) {
-                Label("确认转发",systemImage:"paperplane.fill").font(.title2.weight(.semibold)).foregroundStyle(Theme.blue)
-                Text("收件人：何雪瑶").font(.headline)
-                ScrollView {Text(CopyFormatter.text(entry)).font(.system(size:14)).frame(maxWidth:.infinity,alignment:.leading).padding(14)}
-                    .frame(maxHeight:260).background(.regularMaterial,in:RoundedRectangle(cornerRadius:14))
-                HStack {
-                    Button("取消") {pendingForward=nil}.keyboardShortcut(.cancelAction)
-                    Spacer()
-                    Button("确认发送") {pendingForward=nil;performCopy(forward:true,confirmedSnapshot:entry)}
-                        .buttonStyle(.borderedProminent).keyboardShortcut(.defaultAction)
-                }
-            }.padding(24).frame(width:440).tint(Theme.blue)
+        .onReceive(NotificationCenter.default.publisher(for:AccessibilityPermission.prepareRestartNotification)) {_ in
+            permissionRestarting=true
+            showsForwardingSetup=false;showsTimeSettings=false;showsShortcutSettings=false
+        }
+        .onReceive(NotificationCenter.default.publisher(for:AccessibilityPermission.restoreRestartNotification)) {_ in
+            permissionRestarting=false
+            model.go("settings");showsForwardingSetup=true
+        }
+        .disabled(permissionRestarting)
+        .sheet(isPresented:$showsForwardingSetup) {AutomationSettingsCard(automation:automation) {showsForwardingSetup=false}}
+        .onAppear {
+            if CommandLine.arguments.contains("--resume-forwarding-setup"),Runtime.consumeForwardingResume() {
+                model.go("settings");showsForwardingSetup=true
+            }
         }
         .sheet(isPresented:$model.showOnboarding,onDismiss:{model.onboardingSheetClosed()}) {
             OnboardingView(model:model,services:services,automation:automation)
@@ -206,6 +208,9 @@ struct RootView: View {
     var settings: some View {
         ScrollView {
             VStack(alignment:.leading,spacing:20) {
+                AutomationSettingsEntry(automation:automation)
+                    .background(.regularMaterial,in:RoundedRectangle(cornerRadius:18))
+                    .overlay(RoundedRectangle(cornerRadius:18).stroke(Color.primary.opacity(0.08)))
                 VStack(alignment:.leading,spacing:10) {
                     Text("提醒与偏好").font(.system(size:16,weight:.semibold))
                     VStack(spacing:0) {
@@ -238,8 +243,6 @@ struct RootView: View {
                         AlignedPreferenceToggle(title:"开机启动",icon:"power",help:services.loginHelp,isOn:Binding(get:{services.login},set:{value in Task { await services.setLogin(value) } }),disabled:services.loginBusy)
                         settingsDivider
                         AlignedPreferenceToggle(title:"复制后显示趣味文案",icon:"sparkles",isOn:$copyMessagesEnabled)
-                        settingsDivider
-                        AutomationSettingsEntry(automation:automation)
                         settingsDivider
                         PreferenceRow(title: "编辑快捷键", icon: "keyboard", controlWidth: 190) {
                             Button {
@@ -334,17 +337,16 @@ struct RootView: View {
     }
     func copy() {performCopy(forward:true)}
     func copyOnly() {performCopy(forward:false)}
-    func performCopy(forward:Bool,confirmedSnapshot:Entry?=nil) {
+    func performCopy(forward:Bool) {
         let shouldForward=forward && automation.configuration.enabled
-        guard !showsShortcutSettings && !automation.busy else { return }
+        guard !permissionRestarting && !showsShortcutSettings && !automation.busy else { return }
         editorFocus.commitComposition()
         model.activate()
         guard model.entry.day == ReminderRules.day(Date()) else { model.problem = "当天记录尚未加载，复制已暂停，请先解决保存错误。"; return }
-        let snapshot=confirmedSnapshot ?? model.entry
+        let snapshot=model.entry
         guard snapshot.day == ReminderRules.day(Date()) else {model.problem="日期已变化，请重新转发今天的 Todo。";return}
         if shouldForward && [snapshot.tasks,snapshot.progress,snapshot.blockers].allSatisfy({$0.trimmingCharacters(in:.whitespacesAndNewlines).isEmpty}) {model.problem="请先填写 Todo，再转发。";return}
         guard model.flush() else {return}
-        if shouldForward && automation.configuration.mode == .draft && confirmedSnapshot == nil {pendingForward=snapshot;return}
         flashTask?.cancel()
         if model.page == "today" && !reduceMotion {
             copyFlash=true
@@ -364,7 +366,7 @@ struct RootView: View {
             if let message = toastMessage { Runtime.defaults.set(message,forKey:"lastCopyMessage") }
             withAnimation(.easeOut(duration:reduceMotion ? CopyFeedbackTiming.reducedEnter : CopyFeedbackTiming.enter)) { toastVisible = true }
             if shouldForward {
-                automation.forward(text:CopyFormatter.text(snapshot),day:snapshot.day,confirmed:confirmedSnapshot != nil) {outcome in
+                automation.forward(text:CopyFormatter.text(snapshot),day:snapshot.day) {outcome in
                     copyToastTitle=outcome.title;feishuFeedback=outcome.detail;feedbackSucceeded=outcome.successful
                     dismissFeedbackLater()
                 }

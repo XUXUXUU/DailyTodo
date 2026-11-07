@@ -4,14 +4,15 @@ import Darwin
 
 enum FeishuDeliveryMode:String,Codable,CaseIterable {
     case draft,send
-    var title:String { self == .draft ? "确认后发送" : "直接发送" }
+    var title:String { self == .draft ? "填入聊天框" : "自动发送" }
 }
 struct FeishuAutomationConfiguration:Codable,Equatable {
     var enabled=false
     var recipient="何雪瑶"
     var mode:FeishuDeliveryMode = .draft
     var recipientIsSelf=false
-    func canDispatch(confirmed:Bool,selfTest:Bool)->Bool {selfTest || (enabled && (mode == .send || confirmed))}
+    func canDispatch(selfTest:Bool)->Bool {selfTest || enabled}
+    func deliveryMode(selfTest:Bool)->FeishuDeliveryMode {selfTest ? .send : mode}
     static let key="feishuAutomationV1"
     var buttonTitle:String { enabled ? "一键转发" : "复制全部" }
     var productionSafe:Self {

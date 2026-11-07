@@ -5,7 +5,8 @@ struct OnboardingView: View {
     @ObservedObject var model:Model
     @ObservedObject var services:Services
     @ObservedObject var automation:FeishuAutomationController
-    @State private var step=0
+    @ObservedObject private var permissions=AccessibilityPermission.shared
+    @State private var step=CommandLine.arguments.contains("--resume-onboarding-forwarding") ? 2 : 0
     @State private var draft:ReminderTime = .defaultTime
     @State private var saving=false
     private let blue=Color(nsColor:.systemBlue)
@@ -22,7 +23,7 @@ struct OnboardingView: View {
             }.accessibilityLabel("第\(step+1)页，共4页").padding(.top,14).padding(.bottom,20)
             ScrollView {
                 VStack(spacing:20) {
-                    Text(["几点提醒？","开启提醒","一键转发 Todo","设置完成"][step]).font(.system(size:26,weight:.semibold))
+                    Text(["几点提醒？","开启提醒","开启一键转发","设置完成"][step]).font(.system(size:26,weight:.semibold))
                         .accessibilityAddTraits(.isHeader)
                     switch step {
                     case 0: timePage
@@ -47,7 +48,8 @@ struct OnboardingView: View {
                     LinearGradient(colors:[blue.opacity(0.11),Color.cyan.opacity(0.025),.clear],startPoint:.topLeading,endPoint:.bottomTrailing)
                 }
             }.tint(blue)
-            .onAppear { draft=services.config.time;Task { await services.refresh() } }
+            .onAppear { draft=services.config.time;permissions.startMonitoring();Task { await services.refresh() } }
+            .onDisappear {permissions.stopMonitoring()}
             .onExitCommand { model.finishOnboarding(completed:false) }
     }
     var timePage:some View {
@@ -83,7 +85,7 @@ struct OnboardingView: View {
                 rowDivider
                 completionRow(title:"提醒方式",icon:"bell",value:reminderStatus)
                 rowDivider
-                completionRow(title:"一键转发 Todo",icon:"paperplane.fill",value:automation.configuration.enabled && automation.trusted ? "开启" : "未开启")
+                completionRow(title:"一键转发 Todo",icon:"paperplane.fill",value:automation.configuration.enabled && permissions.ready && automation.trusted ? "开启" : "未开启")
             }
             .background(.regularMaterial,in:RoundedRectangle(cornerRadius:16))
             .overlay(RoundedRectangle(cornerRadius:16).strokeBorder(blue.opacity(0.12)))

@@ -8,15 +8,16 @@ import SwiftUI
     static let shared = AccessibilityGuide()
 
     private static let settingsBundleIdentifier = "com.apple.systempreferences"
-    private static let panelSize = NSSize(width: 310, height: 190)
+    fileprivate static let panelSize = NSSize(width: 350, height: 300)
     private let applicationURL = Bundle.main.bundleURL
-    private let state = AccessibilityGuideState()
+    private let permissions = AccessibilityPermission.shared
     private var panel: AccessibilityGuidePanel?
     private var timer: Timer?
 
     private override init() { super.init() }
 
-    func show() {
+    func show(repair:Bool=false) {
+        if repair,panel != nil {close()}
         if panel == nil {
             let panel = AccessibilityGuidePanel(
                 contentRect: NSRect(origin: .zero, size: Self.panelSize),
@@ -24,7 +25,7 @@ import SwiftUI
                 backing: .buffered,
                 defer: false
             )
-            panel.title = "开启一键转发"
+            panel.title = "完成辅助功能授权"
             panel.isReleasedWhenClosed = false
             panel.isOpaque = false
             panel.backgroundColor = .clear
@@ -38,13 +39,15 @@ import SwiftUI
             panel.contentMinSize = Self.panelSize
             panel.contentMaxSize = Self.panelSize
             panel.contentView = AccessibilityGuideHostingView(rootView: AccessibilityGuideView(
-                state: state,
+                permissions: permissions,
                 appName: applicationURL.deletingPathExtension().lastPathComponent,
                 close: { [weak self] in self?.close() },
                 locateApp: { [weak self] in self?.locateApp() },
-                returnToApp: { [weak self] in self?.returnToApp() }
+                returnToApp: { [weak self] in self?.returnToApp() },
+                initialRecovery:repair
             ))
             self.panel = panel
+            permissions.startMonitoring()
 
             NotificationCenter.default.addObserver(
                 self, selector: #selector(applicationWillTerminate(_:)),
@@ -68,6 +71,7 @@ import SwiftUI
     }
 
     func close() {
+        if panel != nil { permissions.stopMonitoring() }
         timer?.invalidate()
         timer = nil
         NotificationCenter.default.removeObserver(self)
@@ -95,9 +99,6 @@ import SwiftUI
 
     private func refresh() {
         guard let panel else { return }
-        let trusted = AXIsProcessTrusted()
-        if state.trusted != trusted { state.trusted = trusted }
-
         let frontmost = NSWorkspace.shared.frontmostApplication
         let isOwnApp = frontmost?.processIdentifier == ProcessInfo.processInfo.processIdentifier
         let isSettings = frontmost?.bundleIdentifier == Self.settingsBundleIdentifier
@@ -196,16 +197,14 @@ enum AccessibilityGuidePositioning {
     override var canBecomeMain: Bool { false }
 }
 
-@MainActor private final class AccessibilityGuideState: ObservableObject {
-    @Published var trusted = false
-}
-
-private struct AccessibilityGuideView: View {
-    @ObservedObject var state: AccessibilityGuideState
+@MainActor private struct AccessibilityGuideView: View {
+    @ObservedObject var permissions: AccessibilityPermission
     let appName: String
     let close: () -> Void
     let locateApp: () -> Void
     let returnToApp: () -> Void
+    let initialRecovery:Bool
+    @State private var showingRecovery = false
     @Environment(\.accessibilityReduceTransparency) private var reduceTransparency
 
     var body: some View {
@@ -216,9 +215,10 @@ private struct AccessibilityGuideView: View {
                     .frame(width: 28, height: 32)
                     .accessibilityHidden(true)
                 VStack(alignment: .leading, spacing: 3) {
-                    Text("开启一键转发").font(.system(size: 16, weight: .semibold))
-                    Text(state.trusted ? "辅助功能权限已生效" : "在「辅助功能」中完成以下两步")
+                    Text("完成辅助功能授权").font(.system(size: 16, weight: .semibold))
+                    Text(statusDescription)
                         .font(.system(size: 11)).foregroundStyle(.white.opacity(0.86))
+                        .lineLimit(2)
                 }
                 Spacer(minLength: 0)
                 Button(action: close) {
@@ -231,45 +231,22 @@ private struct AccessibilityGuideView: View {
                 .accessibilityLabel("关闭权限引导")
                 .help("关闭权限引导")
             }
-            if state.trusted {
-                HStack(spacing: 8) {
-                    Image(systemName: "checkmark.circle.fill").font(.system(size: 23))
-                    VStack(alignment: .leading, spacing: 3) {
-                        Text("已允许").font(.system(size: 15, weight: .semibold))
-                        Text("现在可以使用一键转发。")
-                            .font(.system(size: 12)).foregroundStyle(.white.opacity(0.9))
-                    }
+            .fixedSize(horizontal: false, vertical: true)
+            // Keep the status and check controls visible even if recovery text wraps.
+            ScrollView(.vertical) {
+                VStack(alignment: .leading, spacing: 10) {
+                    guidance
                 }
-                .accessibilityElement(children: .combine)
-                Spacer(minLength: 0)
-                Button(action: returnToApp) {
-                    Text("返回应用").font(.system(size: 12, weight: .semibold))
-                        .foregroundStyle(Color(red: 0.05, green: 0.25, blue: 0.55))
-                        .frame(maxWidth: .infinity).frame(height: 29)
-                        .background(.white, in: RoundedRectangle(cornerRadius: 8))
-                }.buttonStyle(.plain)
-            } else {
-                VStack(alignment: .leading, spacing: 11) {
-                    step(1, "点击 +，选择 \(appName)")
-                    step(2, "打开 \(appName) 右侧开关")
-                }
-                Spacer(minLength: 0)
-                HStack(spacing: 8) {
-                    Label("等待你打开开关", systemImage: "circle.dotted")
-                        .font(.system(size: 11)).foregroundStyle(.white.opacity(0.86))
-                    Spacer(minLength: 0)
-                    Button(action: locateApp) {
-                        Text("定位应用").font(.system(size: 11, weight: .semibold))
-                            .padding(.horizontal, 10).frame(height: 26)
-                            .background(.white.opacity(0.16), in: RoundedRectangle(cornerRadius: 7))
-                    }
-                    .buttonStyle(.plain)
-                    .help("在访达中显示当前应用，也可将它拖入辅助功能列表。")
-                }
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .padding(.trailing, 4)
             }
+            .frame(maxWidth: .infinity, maxHeight: .infinity)
+            checkControls
+                .fixedSize(horizontal: false, vertical: true)
         }
         .padding(16)
-        .frame(width: 310, height: 190, alignment: .topLeading)
+        .frame(width: AccessibilityGuide.panelSize.width,
+               height: AccessibilityGuide.panelSize.height, alignment: .topLeading)
         .foregroundStyle(.white)
         .background {
             ZStack {
@@ -284,6 +261,137 @@ private struct AccessibilityGuideView: View {
         .clipShape(RoundedRectangle(cornerRadius: 16))
         .overlay(RoundedRectangle(cornerRadius: 16).strokeBorder(.white.opacity(0.3), lineWidth: 1))
         .transaction { $0.animation = nil }
+        .onAppear {showingRecovery=initialRecovery}
+    }
+
+    private var statusDescription: String {
+        switch permissions.status {
+        case .checking: return "正在检测当前应用的授权状态"
+        case .notGranted: return "当前版本尚未获得辅助功能授权"
+        case .restartRequired: return "授权已保存，重启后生效"
+        case .allowed: return "已允许当前应用"
+        }
+    }
+
+    @ViewBuilder private var guidance: some View {
+        if permissions.status == .allowed {
+            HStack(spacing: 8) {
+                Image(systemName: "checkmark.circle.fill").font(.system(size: 23))
+                Text("返回应用，继续设置转发方式。")
+                    .font(.system(size: 12)).foregroundStyle(.white.opacity(0.9))
+            }
+            .accessibilityElement(children: .combine)
+            primaryButton("返回继续设置", action: returnToApp)
+        } else if showingRecovery {
+            VStack(alignment: .leading, spacing: 7) {
+                step(1, "选中旧的同名条目，点击 − 移除")
+                step(2, "点击 +，添加当前的 \(appName)")
+                step(3, "打开开关，再重启以重新检测授权")
+            }
+            recoveryControls
+        } else if permissions.status == .restartRequired {
+            Text("当前应用需要重启。重启后会自动返回设置，继续完成转发配置。")
+                .font(.system(size: 12)).foregroundStyle(.white.opacity(0.9))
+                .fixedSize(horizontal: false, vertical: true)
+            primaryButton("重启并继续设置") { permissions.restart() }
+            recoveryControls
+        } else {
+            VStack(alignment: .leading, spacing: 9) {
+                step(1, "找到 \(appName)，未列出则点 + 添加")
+                step(2, "打开 \(appName) 右侧开关")
+            }
+            recoveryControls
+        }
+    }
+
+    private var recoveryControls: some View {
+        HStack(spacing: 8) {
+            Button(showingRecovery ? recoveryReturnTitle : "开关已开但无效") {
+                showingRecovery.toggle()
+            }
+            .buttonStyle(.plain)
+            .font(.system(size: 11, weight: .medium))
+            .help(showingRecovery ? recoveryReturnTitle : "查看移除旧条目、重新添加当前应用的步骤")
+            Spacer(minLength: 0)
+            Button(action: locateApp) {
+                Text("定位应用").font(.system(size: 11, weight: .semibold))
+                    .padding(.horizontal, 10).frame(height: 26)
+                    .background(.white.opacity(0.16), in: RoundedRectangle(cornerRadius: 7))
+            }
+            .buttonStyle(.plain)
+            .help("在访达中显示当前正在运行的应用，将它添加到辅助功能列表。")
+            if showingRecovery {
+                Button { permissions.restart() } label: {
+                    Text("重启并继续设置").font(.system(size: 11, weight: .semibold))
+                        .foregroundStyle(Color(red: 0.05, green: 0.25, blue: 0.55))
+                        .padding(.horizontal, 10).frame(height: 26)
+                        .background(.white, in: RoundedRectangle(cornerRadius: 7))
+                }
+                .buttonStyle(.plain)
+                .disabled(permissions.status == .checking)
+                .help("先完成重新添加和开启步骤；重启后会重新检测权限，并返回设置。")
+            }
+        }
+    }
+
+    private var checkControls: some View {
+        HStack(spacing: 8) {
+            VStack(alignment: .leading, spacing: 2) {
+                if let error = permissions.error {
+                    Text(error).lineLimit(1).truncationMode(.tail).help(error)
+                } else {
+                    Text(checkResult)
+                }
+                if let lastCheck = permissions.lastCheck {
+                    Text("上次检测 \(lastCheck.formatted(date: .omitted, time: .standard))")
+                        .font(.system(size: 10)).foregroundStyle(.white.opacity(0.72))
+                }
+            }
+            .font(.system(size: 11)).foregroundStyle(.white.opacity(0.9))
+            .accessibilityElement(children: .combine)
+            Spacer(minLength: 0)
+            Button {
+                Task { await permissions.refresh() }
+            } label: {
+                HStack(spacing: 5) {
+                    if permissions.isChecking {
+                        ProgressView().controlSize(.mini).tint(.white)
+                            .frame(width: 12, height: 12)
+                    } else {
+                        Image(systemName: "arrow.clockwise")
+                    }
+                    Text(permissions.isChecking ? "检测中" : "重新检测")
+                }
+                .font(.system(size: 11, weight: .semibold))
+                .padding(.horizontal, 10).frame(height: 28)
+                .background(.white.opacity(0.16), in: RoundedRectangle(cornerRadius: 7))
+            }
+            .buttonStyle(.plain)
+            .disabled(permissions.isChecking)
+            .help("重新检查当前应用的辅助功能授权，不会修改系统权限。")
+        }
+    }
+
+    private var recoveryReturnTitle: String {
+        permissions.status == .restartRequired ? "返回重启提示" : "返回授权步骤"
+    }
+
+    private var checkResult: String {
+        switch permissions.status {
+        case .checking: return "正在检测授权"
+        case .notGranted: return "检测结果：当前版本未获授权"
+        case .restartRequired: return "检测结果：需要重启应用"
+        case .allowed: return "检测结果：当前应用已获授权"
+        }
+    }
+
+    private func primaryButton(_ title: String, action: @escaping () -> Void) -> some View {
+        Button(action: action) {
+            Text(title).font(.system(size: 12, weight: .semibold))
+                .foregroundStyle(Color(red: 0.05, green: 0.25, blue: 0.55))
+                .frame(maxWidth: .infinity).frame(height: 29)
+                .background(.white, in: RoundedRectangle(cornerRadius: 8))
+        }.buttonStyle(.plain)
     }
 
     private func step(_ number: Int, _ text: String) -> some View {

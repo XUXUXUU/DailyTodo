@@ -52,6 +52,11 @@ enum EditorDiagnostics {
     func commitComposition() {
         for view in views.values where view.hasMarkedText() {view.unmarkText();view.didChangeText()}
     }
+    static func commitComposition(in root:NSView?) {
+        guard let root else{return}
+        if let editor=root as? DraftTextView,editor.hasMarkedText() {editor.unmarkText();editor.didChangeText()}
+        for child in root.subviews {commitComposition(in:child)}
+    }
 }
 final class DraftTextView:NSTextView {
     var onFocus:(()->Void)?

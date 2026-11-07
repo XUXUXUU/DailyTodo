@@ -1,5 +1,9 @@
 import Foundation
 struct Runtime {
+    @MainActor private static var forwardingResumePending=CommandLine.arguments.contains("--resume-forwarding-setup") || CommandLine.arguments.contains("--resume-onboarding-forwarding")
+    @MainActor static func consumeForwardingResume()->Bool {
+        let value=forwardingResumePending;forwardingResumePending=false;return value
+    }
     static let sessionID: String? = {
 #if INTEGRATION_TESTING
         let args = CommandLine.arguments

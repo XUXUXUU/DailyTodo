@@ -1,6 +1,8 @@
 import SwiftUI
 import AppKit
 import UserNotifications
+import Darwin
+import ApplicationServices
 @MainActor final class Model: ObservableObject {
     @Published var entry = Entry(day: ReminderRules.day(Date()))
     @Published var saveStatus = "加载中…"
@@ -16,7 +18,7 @@ import UserNotifications
     }
     func finishOnboarding(completed: Bool) {
         onboardingExitRecorded = true
-        Runtime.defaults.set(113,forKey:"onboardingFlowVersion")
+        Runtime.defaults.set(114,forKey:"onboardingFlowVersion")
         Runtime.defaults.set(completed,forKey:"onboardingCompleted")
         Runtime.defaults.set(!completed,forKey:"onboardingSkipped")
         Runtime.defaults.set(true,forKey:"onboarded")
@@ -125,6 +127,56 @@ import UserNotifications
         }
         window.setFrame(frame,display:true);recordWindowMetrics()
     }
+    private var permissionRestartObserver:NSObjectProtocol?
+    private var permissionRestartPending=false
+    private func restartForAccessibility() {
+        guard !permissionRestartPending else{return}
+        permissionRestartPending=true
+        Task { @MainActor in
+            defer {permissionRestartPending=false}
+            let resume=model.showOnboarding ? "--resume-onboarding-forwarding" : "--resume-forwarding-setup"
+            let pendingServicesAtRequest=services.busy || services.loginBusy || services.isSavingReminderTime
+            Runtime.event("permission-restart-requested")
+            NotificationCenter.default.post(name:AccessibilityPermission.prepareRestartNotification,object:nil)
+            if model.showOnboarding {model.finishOnboarding(completed:false)}
+            AccessibilityGuide.shared.close()
+            let sheetsDeadline=ProcessInfo.processInfo.systemUptime+2
+            while (window?.attachedSheet != nil || NSApp.modalWindow != nil) && ProcessInfo.processInfo.systemUptime<sheetsDeadline {
+                try? await Task.sleep(nanoseconds:25_000_000)
+            }
+            @MainActor func failed(_ message:String) {
+                AccessibilityPermission.shared.error=message
+                NotificationCenter.default.post(name:AccessibilityPermission.restoreRestartNotification,object:nil)
+            }
+            guard window?.attachedSheet == nil,NSApp.modalWindow == nil else {failed("请先关闭当前弹窗，再重试重启。");return}
+            let pendingServices=pendingServicesAtRequest || services.busy || services.loginBusy || services.isSavingReminderTime
+            let deadline=ProcessInfo.processInfo.systemUptime+15
+            while (services.busy || services.loginBusy || services.isSavingReminderTime) && ProcessInfo.processInfo.systemUptime<deadline {
+                try? await Task.sleep(nanoseconds:25_000_000)
+            }
+            guard !services.busy,!services.loginBusy,!services.isSavingReminderTime,
+                  !(pendingServices && services.error != nil) else {
+                failed("服务尚未保存完成，请处理设置中的问题后再重启。");return
+            }
+            await services.completionTask?.value
+            EditorFocus.commitComposition(in:window?.contentView)
+            guard !services.busy,!services.loginBusy,!services.isSavingReminderTime else {
+                failed("设置仍在保存，请稍后再重启。");return
+            }
+            guard services.completionError == nil,model.flush(),let executable=Bundle.main.executableURL else {
+                failed("内容尚未保存，请解决保存问题后再重启。");return
+            }
+            guard window?.attachedSheet == nil,NSApp.modalWindow == nil else {
+                failed("请关闭当前弹窗后，再重试重启。");return
+            }
+            var args=["--relaunch-after-pid",String(ProcessInfo.processInfo.processIdentifier),resume]
+            if let session=Runtime.sessionID {args += ["--integration-session",session]}
+            let helper=Process();helper.executableURL=executable;helper.arguments=args
+            helper.standardOutput=FileHandle.nullDevice;helper.standardError=FileHandle.nullDevice
+            do {try helper.run();Runtime.event("permission-restart-helper-launched");NSApp.terminate(nil)}
+            catch {failed("无法重启，请退出后重新打开应用。")}
+        }
+    }
     func applicationDidFinishLaunching(_ notification: Notification) {
 #if INTEGRATION_TESTING
         if Runtime.sessionID != nil, CommandLine.arguments.contains("--integration-cleanup") {
@@ -140,6 +192,10 @@ import UserNotifications
             return
         }
 #endif
+        permissionRestartObserver=NotificationCenter.default.addObserver(forName:AccessibilityPermission.restartNotification,object:nil,queue:.main) { [weak self] _ in
+            Task { @MainActor in self?.restartForAccessibility() }
+        }
+        if CommandLine.arguments.contains("--resume-onboarding-forwarding") {model.beginOnboarding()}
         let preferences = Runtime.defaults.persistentDomain(forName:Runtime.preferencesDomain) ?? [:]
         let notificationProbe = Runtime.sessionID != nil && CommandLine.arguments.contains("--integration-test-notification")
         let automatedInstallTest = Runtime.sessionID != nil && (CommandLine.arguments.contains("--integration-install") || CommandLine.arguments.contains("--integration-v17-scenarios") || notificationProbe)
@@ -354,7 +410,28 @@ import UserNotifications
         Task { @MainActor in self.openToday(); completionHandler() }
     }
 }
-@main struct DailyTodoApp: App {
+@main @MainActor enum DailyTodoEntry {
+    static func main() {
+        let args=CommandLine.arguments
+        if args.contains("--probe-accessibility") {
+            let allowed=AXIsProcessTrusted()
+            FileHandle.standardOutput.write(Data((allowed ? "allowed\n" : "denied\n").utf8))
+            Darwin.exit(allowed ? 0:1)
+        }
+        if args.count>=3,args[1]=="--relaunch-after-pid",let parent=Int32(args[2]),parent>1 {
+            Runtime.event("permission-restart-waiting")
+            let deadline=ProcessInfo.processInfo.systemUptime+30
+            while Darwin.kill(parent,0)==0 && ProcessInfo.processInfo.systemUptime<deadline {Thread.sleep(forTimeInterval:0.1)}
+            guard Darwin.kill(parent,0) != 0 else {Darwin.exit(2)}
+            let open=Process();open.executableURL=URL(fileURLWithPath:"/usr/bin/open")
+            open.arguments=["-n",Bundle.main.bundleURL.path,"--args"]+Array(args.dropFirst(3))
+            do {try open.run();open.waitUntilExit();Darwin.exit(open.terminationStatus)}
+            catch {Darwin.exit(2)}
+        }
+        DailyTodoApp.main()
+    }
+}
+struct DailyTodoApp: App {
     @NSApplicationDelegateAdaptor(AppDelegate.self) var delegate
     var body: some Scene {
         Settings {EmptyView()}.commands {
