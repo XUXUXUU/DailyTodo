@@ -36,8 +36,14 @@ import Foundation
         var approval=FeishuAutomationConfiguration();approval.enabled=true
         check(approval.canDispatch(selfTest:false),"开启后可以填写聊天框，无需应用内二次确认")
         check(approval.deliveryMode(selfTest:false) == .draft,"普通转发保持只填写，不能暗中升级自动发送")
-        check(approval.deliveryMode(selfTest:true) == .send,"显式本人测试发送固定示例，不改变正式模式")
+        check(approval.deliveryMode(selfTest:true) == .draft,"本人填写测试不能暗中升级为自动发送")
+        check(approval.deliveryMode(selfTest:true,testMode:.send) == .send,"未保存的自动发送选择应用于本人测试")
+        check(approval.deliveryMode(selfTest:false,testMode:.send) == .draft,"测试覆盖参数不能改变正式转发方式")
+        check(approval.summary == "填入聊天框","完成页显示填写方式")
+        var sendSummary=approval;sendSummary.mode = .send
+        check(sendSummary.summary == "自动发送","完成页显示自动发送方式")
         approval.enabled=false
+        check(approval.summary == "关闭","未开启必须显示关闭")
         check(!approval.canDispatch(selfTest:false),"关闭功能不可操作飞书")
         check(approval.canDispatch(selfTest:true),"显式本人测试不依赖正式开关")
         check(!FeishuAutomationRules.isEmptyComposer("发送给安龙",name:"安龙",isSelf:true,readable:true,editableText:false),"最终粘贴前仍拒绝同名他人输入区")

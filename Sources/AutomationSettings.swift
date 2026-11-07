@@ -4,232 +4,171 @@ import AppKit
 struct AutomationSettingsCard:View {
     @ObservedObject var automation:FeishuAutomationController
     @ObservedObject private var permissions=AccessibilityPermission.shared
+    var onSaved:()->Void = {}
     let dismiss:()->Void
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
     @State private var draft=FeishuAutomationConfiguration()
     @State private var error:String?
     @State private var saved=false
+    @State private var showsRecovery=false
     private let blue=Color(nsColor:.systemBlue)
-    private var visibleWidth:CGFloat {NSScreen.screens.map { $0.visibleFrame.width }.min() ?? 900}
-    private var visibleHeight:CGFloat {NSScreen.screens.map { $0.visibleFrame.height }.min() ?? 900}
-    private var cardWidth:CGFloat {min(536,visibleWidth-48)}
-    private var cardHeight:CGFloat {min(620,visibleHeight-64)}
-    private var compact:Bool {cardHeight<600}
-    private var tight:Bool {cardHeight<520}
-    private var contentPadding:CGFloat {tight ? 10 : compact ? 16 : 20}
-    private var sectionSpacing:CGFloat {tight ? 6 : compact ? 10 : 14}
-    private var previewHeight:CGFloat {tight ? 80 : cardHeight<550 ? 84 : compact ? 96 : 108}
+    private var cardWidth:CGFloat {min(536,(NSScreen.screens.map {$0.visibleFrame.width}.min() ?? 900)-48)}
+    private var cardHeight:CGFloat {min(feedbackMessage == nil ? 400 : 440,(NSScreen.screens.map {$0.visibleFrame.height}.min() ?? 900)-64)}
+    private var compact:Bool {cardHeight<390}
+    private var canSave:Bool {!automation.busy && (!draft.enabled || permissions.ready)}
 
     var body:some View {
         Group {
-            if saved { savedPage.transition(.opacity) }
-            else { settingsPage.transition(.opacity) }
+            if saved {savedPage.transition(.opacity)}
+            else {settingsPage.transition(.opacity)}
         }
-        .frame(width:cardWidth,height:saved ? min(360,cardHeight) : cardHeight)
+        .frame(width:cardWidth,height:saved ? min(230,cardHeight) : cardHeight)
         .background {
             Color(nsColor:.windowBackgroundColor)
             LinearGradient(colors:[blue.opacity(0.10),.clear],startPoint:.topLeading,endPoint:.bottomTrailing)
         }
         .tint(blue)
         .animation(reduceMotion ? nil : .easeInOut(duration:0.18),value:saved)
-        .interactiveDismissDisabled(automation.busy)
-        .onAppear {draft=automation.configuration;permissions.startMonitoring()}
+        .interactiveDismissDisabled(automation.busy || saved)
+        .onAppear {draft=automation.configuration;automation.clearFeedback();permissions.startMonitoring()}
         .onDisappear {permissions.stopMonitoring()}
+        .task(id:saved) {
+            guard saved else{return}
+            do {try await Task.sleep(nanoseconds:750_000_000)} catch {return}
+            guard !Task.isCancelled else{return}
+            onSaved();dismiss()
+        }
     }
-
     private var settingsPage:some View {
         VStack(spacing:0) {
-            VStack(alignment:.leading,spacing:sectionSpacing) {
+            VStack(alignment:.leading,spacing:compact ? 8 : 10) {
                 HStack(spacing:12) {
-                    AutomationPaperplaneIcon(size:40)
-                    Text("一键转发 Todo").font(.system(size:22,weight:.semibold))
-                        .accessibilityAddTraits(.isHeader)
+                    AutomationPaperplaneIcon(size:36)
+                    Text("一键转发 Todo").font(.system(size:22,weight:.semibold)).accessibilityAddTraits(.isHeader)
                 }.frame(maxWidth:.infinity,alignment:.leading)
                 permissionSection
-                modeSection
-                VStack(spacing:compact ? 4 : 6) {
-                    Button {testSelf()} label:{
-                        Label("发给自己测试",systemImage:"paperplane.fill")
-                            .font(.system(size:16,weight:.semibold))
-                            .foregroundStyle(.white)
-                            .frame(maxWidth:.infinity).frame(height:50)
-                            .background(blue.opacity(permissions.ready ? 1 : 0.45),in:RoundedRectangle(cornerRadius:11))
-                    }
-                    .buttonStyle(.plain)
-                    .disabled(automation.busy || !permissions.ready)
-                    .accessibilityHint("测试会实际发送示例消息至飞书本人会话，与所选转发方式无关")
-                    Text("测试会向你的飞书本人会话发送示例消息。")
-                        .font(.system(size:11)).foregroundStyle(.secondary)
-                        .fixedSize(horizontal:false,vertical:true)
+                VStack(alignment:.leading,spacing:8) {
+                    Text("选择转发方式").font(.system(size:14,weight:.semibold)).accessibilityAddTraits(.isHeader)
+                    HStack(alignment:.top,spacing:10) {deliveryCard(.draft);deliveryCard(.send)}
+                        .disabled(automation.busy || !permissions.ready)
+                }
+                Button {
+                    guard permissions.ready,draft.enabled,!automation.busy else{return}
+                    error=nil;automation.testSelf(mode:draft.mode)
+                } label:{
+                    Label("发给自己测试",systemImage:"paperplane.fill")
+                        .font(.system(size:16,weight:.semibold)).foregroundStyle(.white)
+                        .frame(maxWidth:.infinity).frame(height:48)
+                        .background(blue.opacity(permissions.ready && draft.enabled ? 1 : 0.35),in:RoundedRectangle(cornerRadius:11))
+                }
+                .buttonStyle(.plain).disabled(automation.busy || !permissions.ready || !draft.enabled)
+                .help(draft.mode == .draft ? "把示例填入飞书本人聊天框，不发送" : "自动发送示例至飞书本人会话")
+                if let message=feedbackMessage {
+                    HStack(alignment:.top,spacing:8) {
+                        if automation.busy {ProgressView().controlSize(.small)}
+                        Text(message).font(.system(size:12))
+                            .foregroundStyle(error != nil ? Color.orange : Color.primary)
+                            .lineLimit(2).help(message).accessibilityLabel(message)
+                    }.frame(maxWidth:.infinity,minHeight:28,alignment:.leading)
                 }
             }
-            .padding(contentPadding)
+            .padding(compact ? 12 : 16)
             .frame(maxWidth:.infinity,maxHeight:.infinity,alignment:.topLeading)
             Divider()
-            VStack(alignment:.leading,spacing:compact ? 6 : 8) {
-                feedback.frame(height:tight ? 26 : compact ? 28 : 32,alignment:.leading)
-                HStack {
-                    Button(automation.busy ? "取消操作" : "取消") {
-                        if automation.busy {automation.cancel()}
-                        else {dismiss()}
-                    }.keyboardShortcut(.cancelAction)
-                    Spacer()
-                    Text("保存后生效").font(.system(size:11)).foregroundStyle(.secondary)
-                    Spacer()
-                    Button("保存",action:save)
-                        .buttonStyle(.borderedProminent).keyboardShortcut(.defaultAction)
-                        .disabled(automation.busy || (draft.enabled && !permissions.ready))
-                }.frame(minHeight:28)
-            }
-            .padding(.horizontal,contentPadding).padding(.vertical,tight ? 8 : compact ? 10 : 12)
-        }
-    }
-
-    private var permissionSection:some View {
-        VStack(alignment:.leading,spacing:6) {
-            HStack(spacing:9) {
-                stageHeading(1,title:"开启辅助功能",available:true)
-                Spacer(minLength:8)
-                permissionDetails
-            }.frame(minHeight:28)
-            if permissions.status == .notGranted {
-                Button("开关已开但无效？") {automation.requestPermission(repair:true)}
-                    .font(.system(size:11)).buttonStyle(.link)
-                    .disabled(automation.busy)
-                    .padding(.leading,32)
-            }
-        }
-        .padding(tight ? 8 : compact ? 10 : 12)
-        .frame(maxWidth:.infinity,minHeight:tight ? 64 : compact ? 68 : 76,alignment:.leading)
-        .background(blue.opacity(0.06),in:RoundedRectangle(cornerRadius:16))
-        .overlay(RoundedRectangle(cornerRadius:16).strokeBorder(blue.opacity(0.20)))
-    }
-
-    @ViewBuilder private var permissionDetails:some View {
-        switch permissions.status {
-        case .checking:
-            ProgressView().controlSize(.small)
-            Text("检测中…").font(.system(size:12)).foregroundStyle(.secondary)
-        case .notGranted:
-            HStack(spacing:8) {
-                Text("未开启").font(.system(size:11)).foregroundStyle(.secondary)
-                Button("前往设置") {automation.requestPermission()}
-                    .buttonStyle(.borderedProminent).controlSize(.small)
-                Button("重检测") {Task {await permissions.refresh()}}
-                    .buttonStyle(.link).font(.system(size:12))
-            }.disabled(automation.busy)
-        case .restartRequired:
-            HStack(spacing:8) {
-                Text("重启后生效").font(.system(size:11)).foregroundStyle(.secondary)
-                Button("重启继续") {permissions.restart()}
-                    .buttonStyle(.borderedProminent).controlSize(.small)
-                    .help("授权已保存，重启后将回到此处继续设置")
-                Button("重检测") {Task {await permissions.refresh()}}
-                    .buttonStyle(.link).font(.system(size:12))
-            }.disabled(automation.busy)
-        case .allowed:
-            Label("已开启",systemImage:"checkmark.circle.fill")
-                .font(.system(size:12,weight:.medium)).foregroundStyle(blue)
-        }
-    }
-
-    private var modeSection:some View {
-        VStack(alignment:.leading,spacing:compact ? 8 : 10) {
             HStack {
-                stageHeading(2,title:"选择转发方式",available:permissions.ready)
-                Spacer()
-                Button("仅复制") {draft.enabled=false;error=nil}
-                    .buttonStyle(.link).disabled(automation.busy)
-                    .accessibilityHint("关闭转发，主按钮恢复复制全部；保存后生效")
-            }
-            HStack(alignment:.top,spacing:10) {
-                deliveryCard(.draft)
-                deliveryCard(.send)
-            }
-            .disabled(automation.busy || !permissions.ready)
+                Button {
+                    if automation.busy {automation.cancel()} else {dismiss()}
+                } label:{footerLabel(automation.busy ? "取消操作" : "取消",primary:false)}
+                .keyboardShortcut(.cancelAction).buttonStyle(.plain)
+                Spacer(minLength:16)
+                Button(action:save) {footerLabel("保存",primary:true)}
+                    .keyboardShortcut(.defaultAction).buttonStyle(.plain).disabled(!canSave)
+            }.padding(.horizontal,16).padding(.vertical,12)
         }
     }
-
+    private func footerLabel(_ title:String,primary:Bool)->some View {
+        Text(title).font(.system(size:14,weight:.semibold))
+            .foregroundStyle(primary ? Color.white : Color.primary)
+            .frame(width:132,height:40)
+            .background(primary ? blue.opacity(canSave ? 1 : 0.35) : Color.secondary.opacity(0.12),in:RoundedRectangle(cornerRadius:10))
+            .overlay(RoundedRectangle(cornerRadius:10).strokeBorder(primary ? Color.clear : Color.secondary.opacity(0.16)))
+            .contentShape(Rectangle())
+    }
+    private var permissionSection:some View {
+        HStack(spacing:10) {
+            Image(systemName:"hand.raised.fill").foregroundStyle(blue).frame(width:20)
+            Text("辅助功能").font(.system(size:14,weight:.semibold))
+            Spacer(minLength:8)
+            switch permissions.status {
+            case .checking:
+                Text("检测中…").font(.system(size:12)).foregroundStyle(.secondary)
+            case .allowed:
+                Label("已开启",systemImage:"checkmark.circle.fill").font(.system(size:12,weight:.medium)).foregroundStyle(blue)
+            case .restartRequired:
+                Button("重启继续") {permissions.restart()}.buttonStyle(.borderedProminent).controlSize(.small)
+            case .notGranted:
+                if permissions.hasOpenedSettings {
+                    Button("未能成功？") {showsRecovery=true}
+                        .font(.system(size:12)).buttonStyle(.link)
+                        .popover(isPresented:$showsRecovery) {
+                            VStack(spacing:14) {
+                                Text("移除旧项，再拖入图标并开启")
+                                    .font(.system(size:14,weight:.semibold))
+                                HStack(spacing:18) {
+                                    AccessibilityAppDragIcon(size:48)
+                                    Image(systemName:"arrow.right").foregroundStyle(blue)
+                                    Image(systemName:"list.bullet.rectangle").font(.system(size:34)).foregroundStyle(blue)
+                                }
+                                Button("定位应用") {NSWorkspace.shared.activateFileViewerSelecting([Bundle.main.bundleURL])}
+                                    .controlSize(.large)
+                            }.padding(20).frame(width:280)
+                        }
+                }
+                Button("前往设置") {automation.requestPermission()}.buttonStyle(.borderedProminent).controlSize(.small)
+            }
+        }
+        .padding(.horizontal,12).frame(height:44)
+        .background(blue.opacity(0.06),in:RoundedRectangle(cornerRadius:12))
+        .overlay(RoundedRectangle(cornerRadius:12).strokeBorder(blue.opacity(0.20)))
+        .disabled(automation.busy)
+    }
     private func deliveryCard(_ mode:FeishuDeliveryMode)->some View {
         let selected=draft.enabled && draft.mode == mode
-        let explanation=mode == .draft ? "打开聊天并填入 Todo，由你在飞书点击发送。" : "打开聊天、填入 Todo，并自动发送。"
+        let explanation=mode == .draft ? "仅填入聊天框，由你点击发送" : "填入聊天后自动发送"
         return Button {
-            guard permissions.ready,automation.trusted,!automation.busy else{return}
-            draft.mode=mode;draft.enabled=true;error=nil
+            guard permissions.ready,!automation.busy else{return}
+            draft.mode=mode;draft.enabled=true;error=nil;automation.clearFeedback()
         } label:{
-            VStack(alignment:.leading,spacing:compact ? 6 : 8) {
+            VStack(alignment:.leading,spacing:8) {
                 HStack(spacing:7) {
                     Image(systemName:selected ? "largecircle.fill.circle" : "circle")
                         .foregroundStyle(selected ? blue : .secondary)
                     Text(mode.title).font(.system(size:14,weight:.semibold))
                 }
-                AutomationChatPreview(mode:mode,height:previewHeight)
-                Text(explanation).font(.system(size:compact ? 11 : 12)).foregroundStyle(.secondary)
-                    .fixedSize(horizontal:false,vertical:true)
-                    .frame(maxWidth:.infinity,minHeight:compact ? 30 : 36,alignment:.topLeading)
+                AutomationChatPreview(mode:mode,height:compact ? 64 : 76)
             }
-            .padding(compact ? 8 : 10).frame(maxWidth:.infinity,alignment:.topLeading)
-            .background(selected ? blue.opacity(0.055) : Color(nsColor:.controlBackgroundColor),in:RoundedRectangle(cornerRadius:14))
-            .overlay(RoundedRectangle(cornerRadius:14).strokeBorder(selected ? blue : Color.secondary.opacity(0.20),lineWidth:selected ? 2 : 1))
-            .contentShape(RoundedRectangle(cornerRadius:14))
+            .padding(8).frame(maxWidth:.infinity,alignment:.topLeading)
+            .background(selected ? blue.opacity(0.055) : Color(nsColor:.controlBackgroundColor),in:RoundedRectangle(cornerRadius:13))
+            .overlay(RoundedRectangle(cornerRadius:13).strokeBorder(selected ? blue : Color.secondary.opacity(0.20),lineWidth:selected ? 2 : 1))
+            .contentShape(RoundedRectangle(cornerRadius:13))
         }
-        .buttonStyle(.plain)
-        .accessibilityElement(children:.ignore)
+        .buttonStyle(.plain).accessibilityElement(children:.ignore)
         .accessibilityLabel("\(mode.title)，\(explanation)")
         .accessibilityValue(selected ? "已选择" : "未选择")
         .accessibilityAddTraits(selected ? .isSelected : [])
     }
-
-    private func stageHeading(_ number:Int,title:String,available:Bool)->some View {
-        HStack(spacing:9) {
-            Text("\(number)").font(.system(size:11,weight:.semibold))
-                .foregroundStyle(available ? blue : .secondary)
-                .frame(width:24,height:24)
-                .background(available ? blue.opacity(0.12) : Color.secondary.opacity(0.10),in:Circle())
-            Text(title).font(.system(size:14,weight:.semibold))
-        }.accessibilityElement(children:.combine).accessibilityAddTraits(.isHeader)
-    }
-
-    @ViewBuilder private var feedback:some View {
-        if let message=feedbackMessage {
-            HStack(alignment:.top,spacing:8) {
-                if automation.busy {ProgressView().controlSize(.small)}
-                Text(message).font(.system(size:compact ? 11 : 12))
-                    .foregroundStyle(!automation.busy && (error ?? permissions.error) != nil ? Color.orange : .secondary)
-                    .lineLimit(2).truncationMode(.tail).textSelection(.enabled)
-                    .help(message).accessibilityLabel(message)
-            }.frame(maxWidth:.infinity,alignment:.leading)
-        }
-    }
-
     private var feedbackMessage:String? {
-        if automation.busy {
-            return automation.progress+(automation.detectedSelfName.map {"\n测试对象：\($0)"} ?? "")
-        }
-        return error ?? permissions.error ?? automation.testResult ?? automation.lastResult
+        if automation.busy {return automation.progress}
+        return error ?? permissions.error ?? automation.testResult
     }
-
     private var savedPage:some View {
-        VStack(spacing:22) {
-            Image(systemName:"checkmark.circle.fill")
-                .font(.system(size:76,weight:.regular)).foregroundStyle(blue)
-                .accessibilityHidden(true)
-            Text("设置已保存").font(.system(size:25,weight:.semibold))
-                .accessibilityAddTraits(.isHeader)
-            Button("返回",action:dismiss)
-                .buttonStyle(.borderedProminent).controlSize(.large)
-                .keyboardShortcut(.defaultAction)
-        }.frame(maxWidth:.infinity,maxHeight:.infinity).padding(24)
+        VStack(spacing:16) {
+            Image(systemName:"checkmark.circle.fill").font(.system(size:58)).foregroundStyle(blue).accessibilityHidden(true)
+            Text("设置已保存").font(.system(size:22,weight:.semibold)).accessibilityAddTraits(.isHeader)
+        }.frame(maxWidth:.infinity,maxHeight:.infinity)
     }
-
-    private func testSelf() {
-        guard permissions.ready,automation.trusted,!automation.busy else {return}
-        error=nil
-        automation.testSelf()
-    }
-
     private func save() {
-        guard !automation.busy, !draft.enabled || (permissions.ready && automation.trusted) else {return}
+        guard canSave else{return}
         do {try automation.save(draft);error=nil;saved=true}
         catch {self.error=error.localizedDescription}
     }
@@ -257,7 +196,7 @@ private struct AutomationChatPreview:View {
                     Label("已自动发送",systemImage:"checkmark")
                         .font(.system(size:7)).foregroundStyle(.secondary)
                 } else {
-                    Text("聊天记录").font(.system(size:8)).foregroundStyle(.tertiary)
+                    Text("等待你发送").font(.system(size:9,weight:.medium)).foregroundStyle(blue)
                         .frame(maxWidth:.infinity,maxHeight:.infinity,alignment:.center)
                 }
             }
@@ -293,10 +232,12 @@ struct AutomationSettingsEntry:View {
     @ObservedObject var automation:FeishuAutomationController
     @ObservedObject private var permissions=AccessibilityPermission.shared
     var prominent=false
+    var onConfigured:()->Void = {}
+    @State private var savedPending=false
     @State private var presented=false
     @State private var hovered=false
 
-    private var enabled:Bool {automation.configuration.enabled && permissions.ready && automation.trusted}
+    private var enabled:Bool {automation.configuration.enabled}
     var body:some View {
         Group {
             if prominent {entryButton.buttonStyle(.plain)}
@@ -304,18 +245,28 @@ struct AutomationSettingsEntry:View {
         }
         .disabled(automation.busy)
         .accessibilityLabel("一键转发 Todo")
-        .accessibilityValue(enabled ? "开启" : "未开启")
+        .accessibilityValue(automation.configuration.summary)
         .onAppear {
             permissions.startMonitoring()
             if prominent,Runtime.consumeForwardingResume() {presented=true}
         }
         .onDisappear {permissions.stopMonitoring()}
         .onReceive(NotificationCenter.default.publisher(for:AccessibilityPermission.prepareRestartNotification)) {_ in presented=false}
-        .sheet(isPresented:$presented) {AutomationSettingsCard(automation:automation) {presented=false}}
+        .sheet(isPresented:$presented,onDismiss:{
+            if savedPending {savedPending=false;onConfigured()}
+        }) {AutomationSettingsCard(automation:automation,onSaved:{savedPending=true}) {presented=false}}
+        .contextMenu {
+            if automation.configuration.enabled {
+                Button("关闭一键转发") {
+                    var value=automation.configuration;value.enabled=false
+                    do {try automation.save(value)} catch {permissions.error=error.localizedDescription}
+                }.disabled(automation.busy)
+            }
+        }
     }
 
     private var entryButton:some View {
-        Button {presented=true} label:{
+        Button {savedPending=false;presented=true} label:{
             Group {
                 if prominent {
                     VStack(spacing:20) {
@@ -338,7 +289,7 @@ struct AutomationSettingsEntry:View {
 
     private var status:some View {
         HStack(spacing:7) {
-            Text(enabled ? "开启" : "未开启")
+            Text(automation.configuration.summary)
             Image(systemName:"chevron.right").font(.system(size:10,weight:.semibold))
         }.font(.system(size:12,weight:.medium))
             .foregroundStyle(enabled ? Color(nsColor:.systemBlue) : .secondary)

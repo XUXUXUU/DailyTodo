@@ -8,7 +8,7 @@ import SwiftUI
     static let shared = AccessibilityGuide()
 
     private static let settingsBundleIdentifier = "com.apple.systempreferences"
-    fileprivate static let panelSize = NSSize(width: 350, height: 300)
+    fileprivate static let panelSize = NSSize(width: 428, height: 148)
     private let applicationURL = Bundle.main.bundleURL
     private let permissions = AccessibilityPermission.shared
     private var panel: AccessibilityGuidePanel?
@@ -124,11 +124,18 @@ import SwiftUI
                 intersectionArea(frame, $0.frame) < intersectionArea(frame, $1.frame)
             }).flatMap { intersectionArea(frame, $0.frame) > 0 ? $0 : nil }
         } ?? activeScreen
-        let frame = AccessibilityGuidePositioning.frame(
+        guard let frame = AccessibilityGuidePositioning.frame(
             panelSize: Self.panelSize, settingsFrame: settingsFrame, visibleFrame: screen.visibleFrame
-        )
+        ) else {panel.orderOut(nil);return}
         // No animated following: this also respects Reduce Motion while moving Settings.
-        if panel.frame != frame { panel.setFrame(frame, display: true, animate: false) }
+        if panel.frame != frame {
+            panel.setFrame(frame,display:true,animate:false)
+            Runtime.report("accessibility-guide-frame",payload:[
+                "guide":[frame.minX,frame.minY,frame.width,frame.height],
+                "settings":settingsFrame.map {[$0.minX,$0.minY,$0.width,$0.height]} ?? [],
+                "overlap":settingsFrame.map {$0.intersects(frame)} ?? false
+            ])
+        }
         if !panel.isVisible { panel.orderFrontRegardless() }
     }
 
@@ -172,24 +179,22 @@ enum AccessibilityGuidePositioning {
                width: frame.width, height: frame.height)
     }
 
-    static func frame(panelSize: NSSize, settingsFrame: NSRect?, visibleFrame: NSRect) -> NSRect {
-        let inset = visibleFrame.insetBy(dx: 8, dy: 8)
-        let safeFrame = inset.width >= panelSize.width && inset.height >= panelSize.height
-            ? inset : visibleFrame
-        var origin = NSPoint(x: safeFrame.maxX - panelSize.width - 10, y: safeFrame.minY + 10)
-        if let settingsFrame {
-            let below = settingsFrame.minY - 10 - panelSize.height
-            if below >= safeFrame.minY {
-                origin = NSPoint(x: settingsFrame.maxX - panelSize.width, y: below)
-            } else {
-                origin = NSPoint(x: settingsFrame.maxX - panelSize.width - 14,
-                                 y: settingsFrame.minY + 14)
-            }
-        }
-        origin.x = min(max(origin.x, safeFrame.minX), max(safeFrame.minX, safeFrame.maxX - panelSize.width))
-        origin.y = min(max(origin.y, safeFrame.minY), max(safeFrame.minY, safeFrame.maxY - panelSize.height))
-        return NSRect(origin: origin, size: panelSize)
+    static func frame(panelSize:NSSize,settingsFrame:NSRect?,visibleFrame:NSRect)->NSRect? {
+        guard let settingsFrame else {return nil}
+        let safe=visibleFrame.insetBy(dx:8,dy:8)
+        guard safe.width>=panelSize.width,safe.height>=panelSize.height else {return nil}
+        let gap:CGFloat=10
+        let x=min(max(settingsFrame.midX-panelSize.width/2,safe.minX),safe.maxX-panelSize.width)
+        let y=min(max(settingsFrame.minY,safe.minY),safe.maxY-panelSize.height)
+        let candidates=[
+            NSRect(x:x,y:settingsFrame.minY-gap-panelSize.height,width:panelSize.width,height:panelSize.height),
+            NSRect(x:settingsFrame.maxX+gap,y:y,width:panelSize.width,height:panelSize.height),
+            NSRect(x:settingsFrame.minX-gap-panelSize.width,y:y,width:panelSize.width,height:panelSize.height),
+            NSRect(x:x,y:settingsFrame.maxY+gap,width:panelSize.width,height:panelSize.height)
+        ]
+        return candidates.first {safe.contains($0) && !settingsFrame.intersects($0)}
     }
+
 }
 
 @MainActor private final class AccessibilityGuidePanel: NSPanel {
@@ -197,212 +202,98 @@ enum AccessibilityGuidePositioning {
     override var canBecomeMain: Bool { false }
 }
 
-@MainActor private struct AccessibilityGuideView: View {
-    @ObservedObject var permissions: AccessibilityPermission
-    let appName: String
-    let close: () -> Void
-    let locateApp: () -> Void
-    let returnToApp: () -> Void
+@MainActor private struct AccessibilityGuideView:View {
+    @ObservedObject var permissions:AccessibilityPermission
+    let appName:String
+    let close:()->Void
+    let locateApp:()->Void
+    let returnToApp:()->Void
     let initialRecovery:Bool
-    @State private var showingRecovery = false
+    @State private var showingRecovery=false
     @Environment(\.accessibilityReduceTransparency) private var reduceTransparency
 
-    var body: some View {
-        VStack(alignment: .leading, spacing: 10) {
-            HStack(alignment: .top, spacing: 10) {
-                Image(systemName: "hand.raised.fill")
-                    .font(.system(size: 20, weight: .medium))
-                    .frame(width: 28, height: 32)
-                    .accessibilityHidden(true)
-                VStack(alignment: .leading, spacing: 3) {
-                    Text("完成辅助功能授权").font(.system(size: 16, weight: .semibold))
-                    Text(statusDescription)
-                        .font(.system(size: 11)).foregroundStyle(.white.opacity(0.86))
-                        .lineLimit(2)
-                }
-                Spacer(minLength: 0)
-                Button(action: close) {
-                    Image(systemName: "xmark").font(.system(size: 10, weight: .bold))
-                        .frame(width: 22, height: 22)
-                        .background(.white.opacity(0.14), in: Circle())
-                        .contentShape(Circle())
-                }
-                .buttonStyle(.plain)
-                .accessibilityLabel("关闭权限引导")
-                .help("关闭权限引导")
+    var body:some View {
+        VStack(alignment:.leading,spacing:8) {
+            HStack {
+                Text(showingRecovery ? "先移除旧项，再拖入图标" : "拖入 Daily Todo，打开开关")
+                    .font(.system(size:16,weight:.semibold)).accessibilityAddTraits(.isHeader)
+                Spacer(minLength:4)
+                Button(action:close) {
+                    Image(systemName:"xmark").font(.system(size:10,weight:.bold))
+                        .frame(width:24,height:24).background(.white.opacity(0.14),in:Circle())
+                }.buttonStyle(.plain).accessibilityLabel("关闭权限引导")
             }
-            .fixedSize(horizontal: false, vertical: true)
-            // Keep the status and check controls visible even if recovery text wraps.
-            ScrollView(.vertical) {
-                VStack(alignment: .leading, spacing: 10) {
-                    guidance
-                }
-                .frame(maxWidth: .infinity, alignment: .leading)
-                .padding(.trailing, 4)
+            HStack(spacing:14) {
+                AccessibilityAppDragIcon(size:44)
+                Image(systemName:"arrow.right").font(.system(size:17,weight:.medium)).opacity(0.8)
+                HStack(spacing:10) {
+                    Image(systemName:"list.bullet.rectangle").font(.system(size:28))
+                    Image(systemName:"switch.2").font(.system(size:24))
+                }.frame(width:116,height:42)
+                    .background(.white.opacity(0.10),in:RoundedRectangle(cornerRadius:9))
+                    .overlay(RoundedRectangle(cornerRadius:9).strokeBorder(.white.opacity(0.25),style:StrokeStyle(lineWidth:1,dash:[3])))
+                    .accessibilityLabel("拖入上方辅助功能列表并开启")
+                Spacer(minLength:4)
+                Button("定位应用",action:locateApp).font(.system(size:11)).buttonStyle(.plain)
             }
-            .frame(maxWidth: .infinity, maxHeight: .infinity)
-            checkControls
-                .fixedSize(horizontal: false, vertical: true)
+            HStack(spacing:8) {
+                Label(statusText,systemImage:permissions.ready ? "checkmark.circle.fill" : "circle")
+                    .font(.system(size:12,weight:.medium))
+                Spacer(minLength:4)
+                if permissions.status == .restartRequired {
+                    guideButton("重启继续") {permissions.restart()}
+                } else if permissions.ready {
+                    guideButton("继续设置",action:returnToApp)
+                } else {
+                    Button(showingRecovery ? "返回" : "未能成功？") {showingRecovery.toggle()}
+                        .font(.system(size:11)).buttonStyle(.plain)
+                    guideButton("重新检测") {Task {await permissions.refresh(userInitiated:true)}}
+                        .disabled(permissions.isChecking)
+                }
+            }.frame(height:30)
         }
-        .padding(16)
-        .frame(width: AccessibilityGuide.panelSize.width,
-               height: AccessibilityGuide.panelSize.height, alignment: .topLeading)
+        .padding(14)
+        .frame(width:AccessibilityGuide.panelSize.width,height:AccessibilityGuide.panelSize.height)
         .foregroundStyle(.white)
         .background {
             ZStack {
-                if !reduceTransparency { AccessibilityGuideGlass() }
-                LinearGradient(
-                    colors: [Color(red: 0.10, green: 0.41, blue: 0.78),
-                             Color(red: 0.04, green: 0.24, blue: 0.55)],
-                    startPoint: .topLeading, endPoint: .bottomTrailing
-                ).opacity(reduceTransparency ? 1 : 0.91)
+                if !reduceTransparency {AccessibilityGuideGlass()}
+                LinearGradient(colors:[Color(red:0.10,green:0.41,blue:0.78),Color(red:0.04,green:0.24,blue:0.55)],startPoint:.topLeading,endPoint:.bottomTrailing)
+                    .opacity(reduceTransparency ? 1 : 0.92)
             }
         }
-        .clipShape(RoundedRectangle(cornerRadius: 16))
-        .overlay(RoundedRectangle(cornerRadius: 16).strokeBorder(.white.opacity(0.3), lineWidth: 1))
-        .transaction { $0.animation = nil }
+        .clipShape(RoundedRectangle(cornerRadius:15))
+        .overlay(RoundedRectangle(cornerRadius:15).strokeBorder(.white.opacity(0.3)))
+        .transaction {$0.animation=nil}
         .onAppear {showingRecovery=initialRecovery}
     }
-
-    private var statusDescription: String {
+    private var statusText:String {
         switch permissions.status {
-        case .checking: return "正在检测当前应用的授权状态"
-        case .notGranted: return "当前版本尚未获得辅助功能授权"
-        case .restartRequired: return "授权已保存，重启后生效"
-        case .allowed: return "已允许当前应用"
+        case .checking:return "正在检测"
+        case .notGranted:return "等待开启"
+        case .restartRequired:return "需要重启"
+        case .allowed:return "已开启"
         }
     }
-
-    @ViewBuilder private var guidance: some View {
-        if permissions.status == .allowed {
-            HStack(spacing: 8) {
-                Image(systemName: "checkmark.circle.fill").font(.system(size: 23))
-                Text("返回应用，继续设置转发方式。")
-                    .font(.system(size: 12)).foregroundStyle(.white.opacity(0.9))
-            }
-            .accessibilityElement(children: .combine)
-            primaryButton("返回继续设置", action: returnToApp)
-        } else if showingRecovery {
-            VStack(alignment: .leading, spacing: 7) {
-                step(1, "选中旧的同名条目，点击 − 移除")
-                step(2, "点击 +，添加当前的 \(appName)")
-                step(3, "打开开关，再重启以重新检测授权")
-            }
-            recoveryControls
-        } else if permissions.status == .restartRequired {
-            Text("当前应用需要重启。重启后会自动返回设置，继续完成转发配置。")
-                .font(.system(size: 12)).foregroundStyle(.white.opacity(0.9))
-                .fixedSize(horizontal: false, vertical: true)
-            primaryButton("重启并继续设置") { permissions.restart() }
-            recoveryControls
-        } else {
-            VStack(alignment: .leading, spacing: 9) {
-                step(1, "找到 \(appName)，未列出则点 + 添加")
-                step(2, "打开 \(appName) 右侧开关")
-            }
-            recoveryControls
-        }
-    }
-
-    private var recoveryControls: some View {
-        HStack(spacing: 8) {
-            Button(showingRecovery ? recoveryReturnTitle : "开关已开但无效") {
-                showingRecovery.toggle()
-            }
-            .buttonStyle(.plain)
-            .font(.system(size: 11, weight: .medium))
-            .help(showingRecovery ? recoveryReturnTitle : "查看移除旧条目、重新添加当前应用的步骤")
-            Spacer(minLength: 0)
-            Button(action: locateApp) {
-                Text("定位应用").font(.system(size: 11, weight: .semibold))
-                    .padding(.horizontal, 10).frame(height: 26)
-                    .background(.white.opacity(0.16), in: RoundedRectangle(cornerRadius: 7))
-            }
-            .buttonStyle(.plain)
-            .help("在访达中显示当前正在运行的应用，将它添加到辅助功能列表。")
-            if showingRecovery {
-                Button { permissions.restart() } label: {
-                    Text("重启并继续设置").font(.system(size: 11, weight: .semibold))
-                        .foregroundStyle(Color(red: 0.05, green: 0.25, blue: 0.55))
-                        .padding(.horizontal, 10).frame(height: 26)
-                        .background(.white, in: RoundedRectangle(cornerRadius: 7))
-                }
-                .buttonStyle(.plain)
-                .disabled(permissions.status == .checking)
-                .help("先完成重新添加和开启步骤；重启后会重新检测权限，并返回设置。")
-            }
-        }
-    }
-
-    private var checkControls: some View {
-        HStack(spacing: 8) {
-            VStack(alignment: .leading, spacing: 2) {
-                if let error = permissions.error {
-                    Text(error).lineLimit(1).truncationMode(.tail).help(error)
-                } else {
-                    Text(checkResult)
-                }
-                if let lastCheck = permissions.lastCheck {
-                    Text("上次检测 \(lastCheck.formatted(date: .omitted, time: .standard))")
-                        .font(.system(size: 10)).foregroundStyle(.white.opacity(0.72))
-                }
-            }
-            .font(.system(size: 11)).foregroundStyle(.white.opacity(0.9))
-            .accessibilityElement(children: .combine)
-            Spacer(minLength: 0)
-            Button {
-                Task { await permissions.refresh() }
-            } label: {
-                HStack(spacing: 5) {
-                    if permissions.isChecking {
-                        ProgressView().controlSize(.mini).tint(.white)
-                            .frame(width: 12, height: 12)
-                    } else {
-                        Image(systemName: "arrow.clockwise")
-                    }
-                    Text(permissions.isChecking ? "检测中" : "重新检测")
-                }
-                .font(.system(size: 11, weight: .semibold))
-                .padding(.horizontal, 10).frame(height: 28)
-                .background(.white.opacity(0.16), in: RoundedRectangle(cornerRadius: 7))
-            }
-            .buttonStyle(.plain)
-            .disabled(permissions.isChecking)
-            .help("重新检查当前应用的辅助功能授权，不会修改系统权限。")
-        }
-    }
-
-    private var recoveryReturnTitle: String {
-        permissions.status == .restartRequired ? "返回重启提示" : "返回授权步骤"
-    }
-
-    private var checkResult: String {
-        switch permissions.status {
-        case .checking: return "正在检测授权"
-        case .notGranted: return "检测结果：当前版本未获授权"
-        case .restartRequired: return "检测结果：需要重启应用"
-        case .allowed: return "检测结果：当前应用已获授权"
-        }
-    }
-
-    private func primaryButton(_ title: String, action: @escaping () -> Void) -> some View {
-        Button(action: action) {
-            Text(title).font(.system(size: 12, weight: .semibold))
-                .foregroundStyle(Color(red: 0.05, green: 0.25, blue: 0.55))
-                .frame(maxWidth: .infinity).frame(height: 29)
-                .background(.white, in: RoundedRectangle(cornerRadius: 8))
+    private func guideButton(_ title:String,action:@escaping ()->Void)->some View {
+        Button(action:action) {
+            Text(title).font(.system(size:12,weight:.semibold)).padding(.horizontal,12).frame(height:30)
+                .background(.white.opacity(0.18),in:RoundedRectangle(cornerRadius:8))
         }.buttonStyle(.plain)
     }
+}
 
-    private func step(_ number: Int, _ text: String) -> some View {
-        HStack(spacing: 9) {
-            Text(String(number)).font(.system(size: 11, weight: .bold))
-                .frame(width: 22, height: 22)
-                .background(.white.opacity(0.17), in: Circle())
-            Text(text).font(.system(size: 12, weight: .medium))
-                .lineLimit(2).truncationMode(.middle)
-                .fixedSize(horizontal: false, vertical: true).help(text)
-        }.accessibilityElement(children: .combine)
+struct AccessibilityAppDragIcon:View {
+    let size:CGFloat
+    var body:some View {
+        Image(nsImage:NSWorkspace.shared.icon(forFile:Bundle.main.bundlePath))
+            .resizable().scaledToFit().frame(width:size,height:size)
+            .onDrag {
+                Runtime.event("accessibility-app-drag-started")
+                return NSItemProvider(object:Bundle.main.bundleURL as NSURL)
+            }
+            .accessibilityLabel("拖拽当前 Daily Todo 应用图标")
+            .help("把此图标拖入系统辅助功能列表")
     }
 }
 

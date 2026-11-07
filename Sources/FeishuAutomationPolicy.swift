@@ -12,7 +12,8 @@ struct FeishuAutomationConfiguration:Codable,Equatable {
     var mode:FeishuDeliveryMode = .draft
     var recipientIsSelf=false
     func canDispatch(selfTest:Bool)->Bool {selfTest || enabled}
-    func deliveryMode(selfTest:Bool)->FeishuDeliveryMode {selfTest ? .send : mode}
+    func deliveryMode(selfTest:Bool,testMode:FeishuDeliveryMode?=nil)->FeishuDeliveryMode {selfTest ? (testMode ?? mode) : mode}
+    var summary:String {enabled ? mode.title : "关闭"}
     static let key="feishuAutomationV1"
     var buttonTitle:String { enabled ? "一键转发" : "复制全部" }
     var productionSafe:Self {

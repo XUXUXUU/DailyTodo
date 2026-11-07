@@ -28,13 +28,15 @@ struct FeishuAutomationOutcome {
         if let url=URL(string:"x-apple.systempreferences:com.apple.preference.security?Privacy_Accessibility") {NSWorkspace.shared.open(url)}
     }
     func cancel() {task?.cancel()}
-    func testSelf() {
-        begin(text:"Daily Todo 转发测试\n这是一条发给自己的测试消息。",day:ReminderRules.day(Date()),selfTest:true) {_ in}
+    func clearFeedback() {guard !busy else{return};lastResult=nil;testResult=nil}
+    func testSelf(mode:FeishuDeliveryMode) {
+        let text="Daily Todo 转发测试\n这是一条发给自己的测试消息。\n测试时间："+Date().formatted(date:.abbreviated,time:.standard)
+        begin(text:text,day:ReminderRules.day(Date()),selfTest:true,testMode:mode) {_ in}
     }
     func forward(text:String,day:String,completion:@escaping (FeishuAutomationOutcome)->Void) {
         begin(text:text,day:day,selfTest:false,completion:completion)
     }
-    private func begin(text:String,day:String,selfTest:Bool,completion:@escaping (FeishuAutomationOutcome)->Void) {
+    private func begin(text:String,day:String,selfTest:Bool,testMode:FeishuDeliveryMode?=nil,completion:@escaping (FeishuAutomationOutcome)->Void) {
         guard !busy else{return}
         let testingSelf=selfTest || Runtime.sessionID != nil
         let original=effectiveConfiguration
@@ -42,7 +44,7 @@ struct FeishuAutomationOutcome {
             completion(FeishuAutomationOutcome(title:"请先开启一键转发",detail:nil,successful:false));return
         }
         var config=original
-        config.mode=original.deliveryMode(selfTest:selfTest)
+        config.mode=original.deliveryMode(selfTest:selfTest,testMode:testMode)
         if testingSelf {config.recipient="";config.recipientIsSelf=true;testResult=nil;detectedSelfName=nil}
         let deliveryConfiguration=config
         let clipboardGeneration=NSPasteboard.general.changeCount
@@ -142,7 +144,8 @@ private final class FeishuAXSession:@unchecked Sendable {
     private func fail(_ message:String)throws ->Never {throw FeishuAutomationError.message(message)}
     private func check()throws {
         try Task.checkCancellation()
-        guard AXIsProcessTrusted() else {try fail("辅助功能权限已失效，已停止操作。")}
+        let access=AccessibilityLiveAccess.read(pid:pid)
+        guard access == .allowed || (access == .unknown && AXIsProcessTrusted()) else {try fail("辅助功能权限已失效，已停止操作。") }
         guard NSWorkspace.shared.frontmostApplication?.processIdentifier == pid else {try fail("飞书已不在前台，操作已暂停。请回到飞书检查后重试。")}
     }
     private func attribute(_ element:AXUIElement,_ key:String)->CFTypeRef? {

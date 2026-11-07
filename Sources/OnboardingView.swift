@@ -73,7 +73,7 @@ struct OnboardingView: View {
         }
     }
     var automationPage:some View {
-        AutomationSettingsEntry(automation:automation,prominent:true)
+        AutomationSettingsEntry(automation:automation,prominent:true,onConfigured:{step=3})
             .frame(maxWidth:300).padding(.top,7)
     }
     var donePage:some View {
@@ -85,7 +85,7 @@ struct OnboardingView: View {
                 rowDivider
                 completionRow(title:"提醒方式",icon:"bell",value:reminderStatus)
                 rowDivider
-                completionRow(title:"一键转发 Todo",icon:"paperplane.fill",value:automation.configuration.enabled && permissions.ready && automation.trusted ? "开启" : "未开启")
+                completionRow(title:"一键转发 Todo",icon:"paperplane.fill",value:automation.configuration.summary)
             }
             .background(.regularMaterial,in:RoundedRectangle(cornerRadius:16))
             .overlay(RoundedRectangle(cornerRadius:16).strokeBorder(blue.opacity(0.12)))

@@ -2,6 +2,40 @@ import AppKit
 import ApplicationServices
 import Combine
 
+/// A bounded read of another process is the live permission signal. No contents are traversed.
+enum AccessibilityLiveAccess {
+    static func read(pid:pid_t)->AccessibilityAccessVerdict {
+        guard pid != ProcessInfo.processInfo.processIdentifier else {return .unknown}
+        let target=AXUIElementCreateApplication(pid)
+        AXUIElementSetMessagingTimeout(target,0.25)
+        var value:CFTypeRef?
+        let error=AXUIElementCopyAttributeValue(target,kAXWindowsAttribute as CFString,&value)
+        if error == .apiDisabled {return .denied}
+        if error == .success,let value,CFGetTypeID(value)==CFArrayGetTypeID() {return .allowed}
+        return .unknown
+    }
+    @MainActor static func candidatePIDs()->[pid_t] {
+        let workspace=NSWorkspace.shared
+        let apps=workspace.runningApplications
+        let preferred=[workspace.frontmostApplication?.bundleIdentifier,"com.apple.systempreferences","com.apple.finder"].compactMap {$0}
+        var seen=Set<pid_t>()
+        return preferred.compactMap { id in
+            guard let app=apps.first(where:{$0.bundleIdentifier==id && $0.processIdentifier != ProcessInfo.processInfo.processIdentifier}),seen.insert(app.processIdentifier).inserted else {return nil}
+            return app.processIdentifier
+        }
+    }
+    static func probe(pids:[pid_t]) async ->AccessibilityAccessVerdict {
+        await Task.detached(priority:.utility) {
+            for pid in pids {
+                let result=read(pid:pid)
+                if result != .unknown {return result}
+            }
+            return .unknown
+        }.value
+    }
+
+}
+
 @MainActor final class AccessibilityPermission:ObservableObject {
     static let shared=AccessibilityPermission()
     static let prepareRestartNotification=Notification.Name("DailyTodoPreparePermissionRestart")
@@ -11,12 +45,14 @@ import Combine
     @Published private(set) var lastCheck:Date?
     @Published var error:String?
     @Published var hasOpenedSettings=CommandLine.arguments.contains("--resume-forwarding-setup") || CommandLine.arguments.contains("--resume-onboarding-forwarding")
-    var ready:Bool {status.ready && AXIsProcessTrusted()}
+    var ready:Bool {status.ready}
     private var observers=0
     private var timer:Timer?
     private var activation:AnyCancellable?
     @Published private(set) var isChecking=false
     private var refreshTask:Task<Void,Never>?
+    private var diagnosticTime:Date?
+    private var diagnosticResult:Bool?
 
     private init() {
         activation=NotificationCenter.default.publisher(for:NSApplication.didBecomeActiveNotification)
@@ -39,22 +75,24 @@ import Combine
         observers=max(0,observers-1)
         if observers==0 {timer?.invalidate();timer=nil}
     }
-    func refresh() async {
+    func refresh(userInitiated:Bool=false) async {
+        if userInitiated {isChecking=true}
+        defer {if userInitiated {isChecking=false}}
         if let pending=refreshTask {await pending.value;return}
-        isChecking=true
         let pending=Task { @MainActor in
-            defer {isChecking=false;refreshTask=nil}
-            await performRefresh()
+            defer {refreshTask=nil}
+            await performRefresh(forceDiagnostic:userInitiated)
         }
         refreshTask=pending
         await pending.value
     }
-    private func performRefresh() async {
+    private func performRefresh(forceDiagnostic:Bool) async {
+        let access=await AccessibilityLiveAccess.probe(pids:AccessibilityLiveAccess.candidatePIDs())
+        let shouldDiagnose=access != .allowed && (forceDiagnostic || diagnosticTime == nil || Date().timeIntervalSince(diagnosticTime!)>15)
         let executable=Bundle.main.executableURL
         let supported=(Bundle.main.object(forInfoDictionaryKey:"DailyTodoAccessibilityProbeVersion") as? Int)==1
-        let fresh:Bool
-        if supported,let executable {
-            fresh=await Task.detached(priority:.userInitiated) {
+        if shouldDiagnose,supported,let executable {
+            diagnosticResult=await Task.detached(priority:.userInitiated) {
                 let process=Process();let output=Pipe()
                 process.executableURL=executable
                 process.arguments=["--probe-accessibility"]
@@ -69,10 +107,13 @@ import Combine
                     return process.terminationStatus==0 && text=="allowed\n"
                 } catch {return false}
             }.value
-        } else {fresh=false}
-        status = .evaluate(current:AXIsProcessTrusted(),fresh:fresh)
+            diagnosticTime=Date()
+        }
+        let current=AXIsProcessTrusted()
+        let result=AccessibilityPermissionStatus.evaluate(current:current,fresh:diagnosticResult,access:access)
+        if result != status {status=result}
         lastCheck=Date()
-        Runtime.report("accessibility-permission",payload:["state":String(describing:status),"current":AXIsProcessTrusted(),"fresh":fresh])
+        Runtime.report("accessibility-permission",payload:["state":String(describing:status),"current":current,"fresh":diagnosticResult.map {$0 as Any} ?? NSNull(),"access":access.rawValue,"manual":forceDiagnostic])
     }
     func restart() {
         guard status == .restartRequired || status == .notGranted else{return}
