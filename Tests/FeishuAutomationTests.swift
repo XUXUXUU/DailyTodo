@@ -4,6 +4,44 @@ import Foundation
     static func main() throws {
         var count=0
         func check(_ value:Bool,_ name:String) { precondition(value,name);count += 1;print("PASS:",name) }
+        var startup=FeishuStartupReadiness(existingPIDs:[])
+        func candidate(_ pid:Int32,_ active:Bool=true,_ ready:Bool=true)->FeishuStartupCandidate {
+            FeishuStartupCandidate(pid:pid,finished:true,active:active,ready:ready)
+        }
+        check(startup.sample([],at:0) == .wait,"飞书未启动时等待，不误用旧进程")
+        check(startup.sample([candidate(10,true,false)],at:1) == .wait,"启动进程没有聊天界面时不能开始自动化")
+        check(startup.sample([],at:2) == .wait,"启动进程退出交接时继续等待")
+        check(startup.sample([candidate(20,false)],at:3) == .activate(20),"交接后激活真正的新进程")
+        check(startup.sample([candidate(20)],at:3.2) == .wait,"新窗口需稳定后才可操作")
+        check(startup.sample([candidate(20)],at:5.3) == .ready(20),"自动化使用交接后的进程")
+        var multiple=FeishuStartupReadiness(existingPIDs:[])
+        check(multiple.sample([candidate(1),candidate(2)],at:0) == .wait,"多个同身份进程不随机选择")
+        var changed=FeishuStartupReadiness(existingPIDs:[])
+        _ = changed.sample([candidate(1)],at:0)
+        check(changed.sample([candidate(2)],at:1.9) == .wait,"更换进程会重置就绪计时")
+        check(changed.sample([candidate(2)],at:4) == .ready(2),"新进程独立完成稳定检测")
+        var warm=FeishuStartupReadiness(existingPIDs:[3])
+        _ = warm.sample([candidate(3)],at:0)
+        check(warm.sample([candidate(3)],at:0.6) == .ready(3),"已运行飞书无需完整冷启动等待")
+        var focus=FeishuStartupReadiness(existingPIDs:[])
+        _ = focus.sample([candidate(4)],at:0)
+        check(focus.sample([candidate(4,false)],at:0.3) == .foregroundLost,"界面就绪后用户切走即停止，不反复抢焦点")
+        var activation=FeishuStartupReadiness(existingPIDs:[])
+        _ = activation.sample([candidate(5,false)],at:0)
+        check(activation.sample([candidate(5,false)],at:0.3) == .wait,"同一进程只请求激活一次")
+        check(activation.sample([candidate(5,false)],at:2.1) == .foregroundLost,"激活未成功时明确停止")
+        var earlyFocus=FeishuStartupReadiness(existingPIDs:[])
+        _ = earlyFocus.sample([candidate(6,true,false)],at:0)
+        _ = earlyFocus.sample([candidate(6,false,false)],at:0.3)
+        check(earlyFocus.sample([candidate(6,false,true)],at:5) == .foregroundLost,"就绪前切走不能稍后重新抢焦点")
+        var interrupted=FeishuStartupReadiness(existingPIDs:[])
+        check(interrupted.sample([],at:0,interrupted:true) == .foregroundLost,"等待期间用户切走即终止请求")
+        check(interrupted.sample([candidate(9)],at:5) == .foregroundLost,"更换进程不能清除用户中断")
+        var handoff=FeishuStartupReadiness(existingPIDs:[])
+        _ = handoff.sample([candidate(1,true,false)],at:0)
+        _ = handoff.sample([candidate(1,false,false)],at:0.1)
+        _ = handoff.sample([],at:0.2)
+        check(handoff.sample([candidate(2,false)],at:0.3) == .activate(2),"真实进程退出交接仍可激活新进程")
         // A document before the sidebar used to exhaust the depth-first budget.
         final class Fixture {
             let name:String;let role:String;let url:String

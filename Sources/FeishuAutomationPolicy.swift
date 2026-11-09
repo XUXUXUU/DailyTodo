@@ -2,6 +2,50 @@ import Foundation
 import CryptoKit
 import Darwin
 
+struct FeishuStartupCandidate {
+    let pid:Int32
+    let finished:Bool
+    let active:Bool
+    let ready:Bool
+}
+struct FeishuStartupReadiness {
+    enum Action:Equatable {case wait,activate(Int32),ready(Int32),foregroundLost}
+    let existingPIDs:Set<Int32>
+    private var pid:Int32?
+    private var readySince:Double?
+    private var activationAt:Double?
+    private var observedActive=false
+    private var lostAt:Double?
+    private var interrupted=false
+    init(existingPIDs:Set<Int32>) {self.existingPIDs=existingPIDs}
+    mutating func sample(_ candidates:[FeishuStartupCandidate],at now:Double,interrupted:Bool=false)->Action {
+        self.interrupted = self.interrupted || interrupted
+        if self.interrupted {return .foregroundLost}
+        guard candidates.count==1,let candidate=candidates.first else {
+            pid=nil;readySince=nil;activationAt=nil;observedActive=false;lostAt=nil;return .wait
+        }
+        if pid != candidate.pid {
+            pid=candidate.pid;readySince=nil;activationAt=nil;observedActive=false;lostAt=nil
+        }
+        if candidate.active {observedActive=true;lostAt=nil}
+        else if observedActive {
+            if readySince != nil {return .foregroundLost}
+            // A terminating launcher can briefly return focus to its caller.
+            // Wait for the handoff, without activating the same process again.
+            if let lostAt {return now-lostAt>=1 ? .foregroundLost : .wait}
+            lostAt=now;return .wait
+        }
+        guard candidate.finished,candidate.ready else {readySince=nil;return .wait}
+        guard candidate.active else {
+            readySince=nil
+            guard let activationAt else {self.activationAt=now;return .activate(candidate.pid)}
+            return now-activationAt>=2 ? .foregroundLost : .wait
+        }
+        guard let since=readySince else {readySince=now;return .wait}
+        return now-since >= (existingPIDs.contains(candidate.pid) ? 0.5 : 2) ? .ready(candidate.pid) : .wait
+    }
+}
+
 enum FeishuDeliveryMode:String,Codable,CaseIterable {
     case draft,send
     var title:String { self == .draft ? "填入聊天框" : "自动发送" }

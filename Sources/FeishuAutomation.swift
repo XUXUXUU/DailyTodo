@@ -61,25 +61,9 @@ struct FeishuAutomationOutcome {
                     throw FeishuAutomationError.message("请先在一键转发设置中开启辅助功能。")
                 }
                 guard let url=NSWorkspace.shared.urlForApplication(withBundleIdentifier:"com.electron.lark") else {throw FeishuAutomationError.message("未找到飞书，请先安装飞书。")}
-                let app=try await withCheckedThrowingContinuation { (continuation:CheckedContinuation<NSRunningApplication,Error>) in
-                    let options=NSWorkspace.OpenConfiguration();options.activates=true
-                    NSWorkspace.shared.openApplication(at:url,configuration:options) {app,error in
-                        if let app,error == nil {continuation.resume(returning:app)}
-                        else {continuation.resume(throwing:error ?? FeishuAutomationError.message("无法启动飞书。"))}
-                    }
-                }
-                let startupDeadline=ProcessInfo.processInfo.systemUptime+15
-                while !app.isFinishedLaunching && ProcessInfo.processInfo.systemUptime < startupDeadline {
-                    try Task.checkCancellation();try await Task.sleep(nanoseconds:100_000_000)
-                }
-                _ = app.activate(options:.activateIgnoringOtherApps)
-                var activeSamples=0
-                while activeSamples < 3 && ProcessInfo.processInfo.systemUptime < startupDeadline {
-                    try Task.checkCancellation()
-                    activeSamples=app.isActive ? activeSamples+1 : 0
-                    try await Task.sleep(nanoseconds:100_000_000)
-                }
-                guard activeSamples==3 else {throw FeishuAutomationError.message("飞书未能进入前台，请确认已登录后重试。")}
+                let app=try await prepareFeishu(at:url)
+                await AccessibilityPermission.shared.refresh()
+                guard trusted else {throw FeishuAutomationError.accessibilityRestartRequired}
                 try Task.checkCancellation()
                 let worker=Task.detached(priority:.userInitiated) {
                     let session=FeishuAXSession(pid:app.processIdentifier)
@@ -105,6 +89,68 @@ struct FeishuAutomationOutcome {
             completion(outcome)
         }
     }
+    private func prepareFeishu(at url:URL) async throws ->NSRunningApplication {
+        let canonical=url.resolvingSymlinksInPath().standardizedFileURL
+        func running()->[NSRunningApplication] {
+            NSRunningApplication.runningApplications(withBundleIdentifier:"com.electron.lark").filter {
+                !$0.isTerminated && $0.bundleURL?.resolvingSymlinksInPath().standardizedFileURL == canonical
+            }
+        }
+        let existing=Set(running().map(\.processIdentifier))
+        let originPID=NSWorkspace.shared.frontmostApplication?.processIdentifier
+        progress=existing.isEmpty ? "正在启动飞书…" : "正在打开飞书…"
+        let request=FeishuLaunchRequest()
+        let options=NSWorkspace.OpenConfiguration();options.activates=true
+        NSWorkspace.shared.openApplication(at:canonical,configuration:options) {app,error in
+            let pid=app?.processIdentifier
+            let message=error?.localizedDescription ?? (app == nil ? "无法启动飞书。" : nil)
+            Task { @MainActor in request.finished=true;request.error=message;request.callbackPID=pid }
+        }
+        let started=ProcessInfo.processInfo.systemUptime
+        var readiness=FeishuStartupReadiness(existingPIDs:existing)
+        var sawWindow=false
+        while ProcessInfo.processInfo.systemUptime-started<45 {
+            try Task.checkCancellation()
+            if let error=request.error {throw FeishuAutomationError.message("无法打开飞书："+error)}
+            let apps=running()
+            var candidates:[FeishuStartupCandidate]=[]
+            if request.finished,apps.count==1,let app=apps.first {
+                let pid=app.processIdentifier
+                let deadline=min(started+45,ProcessInfo.processInfo.systemUptime+1.5)
+                let probe=Task.detached(priority:.userInitiated) {FeishuAXSession.hasStartupControls(pid:pid,deadline:deadline)}
+                let ready=await withTaskCancellationHandler(operation:{await probe.value},onCancel:{probe.cancel()})
+                try Task.checkCancellation()
+                sawWindow = sawWindow || ready
+                candidates=[FeishuStartupCandidate(pid:pid,finished:app.isFinishedLaunching,active:app.isActive,ready:ready)]
+            }
+            let front=NSWorkspace.shared.frontmostApplication
+            let interrupted=front.map {app in
+                app.processIdentifier != ProcessInfo.processInfo.processIdentifier && app.processIdentifier != originPID &&
+                app.bundleIdentifier != "com.electron.lark" && app.bundleIdentifier != "com.apple.dock"
+            } ?? false
+            let action=readiness.sample(candidates,at:ProcessInfo.processInfo.systemUptime,interrupted:interrupted)
+            Runtime.report("feishu-startup",payload:["callbackPID":request.callbackPID ?? 0,"runningPIDs":apps.map(\.processIdentifier),"elapsed":ProcessInfo.processInfo.systemUptime-started,"controlsReady":candidates.first?.ready ?? false,"action":String(describing:action),"frontmost":front?.bundleIdentifier ?? "unknown"])
+            switch action {
+            case .activate(let pid):
+                _ = apps.first(where:{$0.processIdentifier==pid})?.activate(options:.activateIgnoringOtherApps)
+            case .ready(let pid):
+                guard let app=apps.first(where:{$0.processIdentifier==pid}),!app.isTerminated else {continue}
+                return app
+            case .foregroundLost:
+                throw FeishuAutomationError.message("飞书已打开，但当前不在前台。已停止转发，请回到飞书后重试。")
+            case .wait:break
+            }
+            if request.finished,progress != "正在等待飞书聊天界面…" {progress="正在等待飞书聊天界面…"}
+            try await Task.sleep(nanoseconds:200_000_000)
+        }
+        throw FeishuAutomationError.message(sawWindow ? "飞书启动未能稳定完成，已停止转发。请处理飞书弹窗后重试。" : "飞书已请求打开，但尚未出现可用的聊天界面。请完成登录或处理启动弹窗后重试。")
+    }
+}
+
+@MainActor private final class FeishuLaunchRequest {
+    var finished=false
+    var error:String?
+    var callbackPID:pid_t?
 }
 
 private final class FeishuAXNode {
@@ -143,6 +189,40 @@ private final class FeishuAXNode {
 private final class FeishuAXSession:@unchecked Sendable {
     let app:AXUIElement
     let pid:pid_t
+    /// Native sidebar only: a launcher/splash process is not a usable chat window.
+    static func hasStartupControls(pid:pid_t,deadline:Double)->Bool {
+        let app=AXUIElementCreateApplication(pid)
+        AXUIElementSetMessagingTimeout(app,0.25)
+        _ = AXUIElementSetAttributeValue(app,"AXEnhancedUserInterface" as CFString,kCFBooleanTrue)
+        _ = AXUIElementSetAttributeValue(app,"AXManualAccessibility" as CFString,kCFBooleanTrue)
+        func attribute(_ element:AXUIElement,_ key:String)->CFTypeRef? {
+            guard !Task.isCancelled,ProcessInfo.processInfo.systemUptime<deadline else {return nil}
+            AXUIElementSetMessagingTimeout(element,Float(min(0.15,max(0.01,deadline-ProcessInfo.processInfo.systemUptime))))
+            var value:CFTypeRef?
+            return AXUIElementCopyAttributeValue(element,key as CFString,&value) == .success ? value:nil
+        }
+        guard let windows=attribute(app,kAXWindowsAttribute) as? [AXUIElement] else {return false}
+        for window in windows.prefix(8) {
+            guard !Task.isCancelled,ProcessInfo.processInfo.systemUptime<deadline else {return false}
+            var queue:[(AXUIElement,Int)]=[(window,0)];var index=0
+            var avatar=false,search=false
+            while index<queue.count && index<400 {
+                guard !Task.isCancelled,ProcessInfo.processInfo.systemUptime<deadline else {return false}
+                let (element,depth)=queue[index];index += 1
+                let role=attribute(element,kAXRoleAttribute) as? String ?? ""
+                if role==kAXButtonRole {
+                    let labels=[kAXTitleAttribute,kAXDescriptionAttribute].compactMap {attribute(element,$0) as? String}
+                    avatar = avatar || labels.contains("我的头像")
+                    search = search || labels.contains(where:{$0.hasPrefix("搜索（") || $0.hasPrefix("搜索(")})
+                    if avatar && search {return true}
+                }
+                if role != "AXWebArea",depth<30,let children=attribute(element,kAXChildrenAttribute) as? [AXUIElement] {
+                    queue.append(contentsOf:children.prefix(max(0,400-queue.count)).map {($0,depth+1)})
+                }
+            }
+        }
+        return false
+    }
     init(pid:pid_t) {
         self.pid=pid;app=AXUIElementCreateApplication(pid);AXUIElementSetMessagingTimeout(app,0.4)
         _ = AXUIElementSetAttributeValue(app,"AXEnhancedUserInterface" as CFString,kCFBooleanTrue)
