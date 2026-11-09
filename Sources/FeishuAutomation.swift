@@ -21,6 +21,7 @@ struct FeishuAutomationOutcome {
         guard !busy else {throw FeishuAutomationError.message("正在转发，请先取消当前操作再修改。")};guard !value.enabled || trusted else {throw FeishuAutomationError.message("请先开启辅助功能。")};try value.productionSafe.save(to:Runtime.defaults);configuration=FeishuAutomationConfiguration.load(from:Runtime.defaults).productionSafe
     }
     func requestPermission(repair:Bool=false) {
+        guard !trusted else {AccessibilityGuide.shared.close();return}
         AccessibilityPermission.shared.hasOpenedSettings=true
         openPermissions();AccessibilityGuide.shared.show(repair:repair)
     }

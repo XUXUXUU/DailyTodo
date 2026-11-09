@@ -119,8 +119,7 @@ struct AutomationSettingsCard:View {
                                     Image(systemName:"arrow.right").foregroundStyle(blue)
                                     Image(systemName:"list.bullet.rectangle").font(.system(size:34)).foregroundStyle(blue)
                                 }
-                                Button("定位应用") {NSWorkspace.shared.activateFileViewerSelecting([Bundle.main.bundleURL])}
-                                    .controlSize(.large)
+                                RevealCurrentAppButton {NSWorkspace.shared.activateFileViewerSelecting([Bundle.main.bundleURL])}
                             }.padding(20).frame(width:280)
                         }
                 }

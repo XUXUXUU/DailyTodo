@@ -13,6 +13,7 @@ import SwiftUI
     private let permissions = AccessibilityPermission.shared
     private var panel: AccessibilityGuidePanel?
     private var timer: Timer?
+    private var continuation=AccessibilityGuideContinuation()
 
     private override init() { super.init() }
 
@@ -40,13 +41,12 @@ import SwiftUI
             panel.contentMaxSize = Self.panelSize
             panel.contentView = AccessibilityGuideHostingView(rootView: AccessibilityGuideView(
                 permissions: permissions,
-                appName: applicationURL.deletingPathExtension().lastPathComponent,
                 close: { [weak self] in self?.close() },
                 locateApp: { [weak self] in self?.locateApp() },
-                returnToApp: { [weak self] in self?.returnToApp() },
                 initialRecovery:repair
             ))
             self.panel = panel
+            continuation.begin()
             permissions.startMonitoring()
 
             NotificationCenter.default.addObserver(
@@ -71,6 +71,7 @@ import SwiftUI
     }
 
     func close() {
+        continuation.cancel()
         if panel != nil { permissions.stopMonitoring() }
         timer?.invalidate()
         timer = nil
@@ -86,10 +87,19 @@ import SwiftUI
     @objc private func environmentDidChange(_ notification: Notification) { refresh() }
     @objc private func timerDidFire(_ timer: Timer) { refresh() }
 
-    private func returnToApp() {
-        // Activation is deliberately confined to this explicit button action.
+    private func finishAuthorization(_ action:AccessibilityGuideContinuation.Action,origin:String?) {
         close()
-        NSApp.activate(ignoringOtherApps: true)
+        if action == .returnToApp {NSApp.activate(ignoringOtherApps:true)}
+        Task { @MainActor in
+            try? await Task.sleep(nanoseconds:200_000_000)
+            Runtime.report("accessibility-guide-completion",payload:[
+                "action":action == .returnToApp ? "return-to-app" : "close-quietly",
+                "origin":origin ?? "unknown",
+                "appActive":NSApp.isActive,
+                "helperOpen":panel != nil,
+                "frontmost":NSWorkspace.shared.frontmostApplication?.bundleIdentifier ?? "unknown"
+            ])
+        }
     }
 
     private func locateApp() {
@@ -102,6 +112,11 @@ import SwiftUI
         let frontmost = NSWorkspace.shared.frontmostApplication
         let isOwnApp = frontmost?.processIdentifier == ProcessInfo.processInfo.processIdentifier
         let isSettings = frontmost?.bundleIdentifier == Self.settingsBundleIdentifier
+        let completion=continuation.take(ready:permissions.ready,setupOwnsFocus:isOwnApp || isSettings)
+        if completion != .none {
+            finishAuthorization(completion,origin:frontmost?.bundleIdentifier)
+            return
+        }
         guard isOwnApp || isSettings else {
             panel.orderOut(nil)
             return
@@ -204,10 +219,8 @@ enum AccessibilityGuidePositioning {
 
 @MainActor private struct AccessibilityGuideView:View {
     @ObservedObject var permissions:AccessibilityPermission
-    let appName:String
     let close:()->Void
     let locateApp:()->Void
-    let returnToApp:()->Void
     let initialRecovery:Bool
     @State private var showingRecovery=false
     @Environment(\.accessibilityReduceTransparency) private var reduceTransparency
@@ -234,19 +247,15 @@ enum AccessibilityGuidePositioning {
                     .overlay(RoundedRectangle(cornerRadius:9).strokeBorder(.white.opacity(0.25),style:StrokeStyle(lineWidth:1,dash:[3])))
                     .accessibilityLabel("拖入上方辅助功能列表并开启")
                 Spacer(minLength:4)
-                Button("定位应用",action:locateApp).font(.system(size:11)).buttonStyle(.plain)
+                RevealCurrentAppButton(action:locateApp)
             }
             HStack(spacing:8) {
-                Label(statusText,systemImage:permissions.ready ? "checkmark.circle.fill" : "circle")
-                    .font(.system(size:12,weight:.medium))
+                Button(showingRecovery ? "返回" : "未能成功？") {showingRecovery.toggle()}
+                    .font(.system(size:11)).buttonStyle(.plain)
                 Spacer(minLength:4)
                 if permissions.status == .restartRequired {
                     guideButton("重启继续") {permissions.restart()}
-                } else if permissions.ready {
-                    guideButton("继续设置",action:returnToApp)
-                } else {
-                    Button(showingRecovery ? "返回" : "未能成功？") {showingRecovery.toggle()}
-                        .font(.system(size:11)).buttonStyle(.plain)
+                } else if !permissions.ready {
                     guideButton("重新检测") {Task {await permissions.refresh(userInitiated:true)}}
                         .disabled(permissions.isChecking)
                 }
@@ -267,19 +276,30 @@ enum AccessibilityGuidePositioning {
         .transaction {$0.animation=nil}
         .onAppear {showingRecovery=initialRecovery}
     }
-    private var statusText:String {
-        switch permissions.status {
-        case .checking:return "正在检测"
-        case .notGranted:return "等待开启"
-        case .restartRequired:return "需要重启"
-        case .allowed:return "已开启"
-        }
-    }
     private func guideButton(_ title:String,action:@escaping ()->Void)->some View {
         Button(action:action) {
             Text(title).font(.system(size:12,weight:.semibold)).padding(.horizontal,12).frame(height:30)
                 .background(.white.opacity(0.18),in:RoundedRectangle(cornerRadius:8))
         }.buttonStyle(.plain)
+    }
+}
+
+struct RevealCurrentAppButton:View {
+    let action:()->Void
+    @State private var hovered=false
+    private let ink=Color(red:0.04,green:0.25,blue:0.55)
+    var body:some View {
+        Button(action:action) {
+            Label("在访达中显示",systemImage:"folder")
+                .font(.system(size:12,weight:.semibold)).foregroundStyle(ink)
+                .padding(.horizontal,10).frame(height:32)
+                .background(.white.opacity(hovered ? 1 : 0.93),in:RoundedRectangle(cornerRadius:8))
+                .overlay(RoundedRectangle(cornerRadius:8).strokeBorder(.white.opacity(0.6)))
+                .shadow(color:.black.opacity(0.10),radius:3,y:1)
+                .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain).onHover {hovered=$0}
+        .help("在访达中选中当前正在运行的 Daily Todo 应用")
     }
 }
 

@@ -13,3 +13,16 @@ enum AccessibilityPermissionStatus:Equatable {
         return current ? .allowed : .restartRequired
     }
 }
+
+
+struct AccessibilityGuideContinuation {
+    enum Action {case none,returnToApp,closeQuietly}
+    private var pending=false
+    mutating func begin() {pending=true}
+    mutating func cancel() {pending=false}
+    mutating func take(ready:Bool,setupOwnsFocus:Bool)->Action {
+        guard pending,ready else {return .none}
+        pending=false
+        return setupOwnsFocus ? .returnToApp : .closeQuietly
+    }
+}
