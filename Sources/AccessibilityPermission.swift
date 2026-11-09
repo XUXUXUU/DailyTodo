@@ -17,20 +17,20 @@ enum AccessibilityLiveAccess {
     @MainActor static func candidatePIDs()->[pid_t] {
         let workspace=NSWorkspace.shared
         let apps=workspace.runningApplications
-        let preferred=[workspace.frontmostApplication?.bundleIdentifier,"com.apple.systempreferences","com.apple.finder"].compactMap {$0}
+        let preferred=[workspace.frontmostApplication?.bundleIdentifier,"com.electron.lark","com.apple.finder","com.apple.systempreferences"].compactMap {$0}
         var seen=Set<pid_t>()
         return preferred.compactMap { id in
             guard let app=apps.first(where:{$0.bundleIdentifier==id && $0.processIdentifier != ProcessInfo.processInfo.processIdentifier}),seen.insert(app.processIdentifier).inserted else {return nil}
             return app.processIdentifier
         }
     }
-    static func probe(pids:[pid_t]) async ->AccessibilityAccessVerdict {
+    static func probe(pids:[pid_t]) async ->(access:AccessibilityAccessVerdict,trusted:Bool,targets:[pid_t:AccessibilityAccessVerdict]) {
         await Task.detached(priority:.utility) {
-            for pid in pids {
-                let result=read(pid:pid)
-                if result != .unknown {return result}
-            }
-            return .unknown
+            var results:[AccessibilityAccessVerdict]=[]
+            for pid in pids {results.append(read(pid:pid))}
+            let trusted=AXIsProcessTrusted()
+            Runtime.report("accessibility-probes",payload:["pids":pids,"results":results.map(\.rawValue),"workerTrusted":trusted])
+            return (AccessibilityAccessVerdict.combining(results),trusted,Dictionary(uniqueKeysWithValues:zip(pids,results)))
         }.value
     }
 
@@ -46,6 +46,7 @@ enum AccessibilityLiveAccess {
     @Published var error:String?
     @Published var hasOpenedSettings=CommandLine.arguments.contains("--resume-forwarding-setup") || CommandLine.arguments.contains("--resume-onboarding-forwarding")
     var ready:Bool {status.ready}
+    private var permissionSession=AccessibilityPermissionSession()
     private var observers=0
     private var timer:Timer?
     private var activation:AnyCancellable?
@@ -53,6 +54,7 @@ enum AccessibilityLiveAccess {
     private var refreshTask:Task<Void,Never>?
     private var diagnosticTime:Date?
     private var diagnosticResult:Bool?
+    private var diagnosticCurrent:Bool?
 
     private init() {
         activation=NotificationCenter.default.publisher(for:NSApplication.didBecomeActiveNotification)
@@ -87,8 +89,13 @@ enum AccessibilityLiveAccess {
         await pending.value
     }
     private func performRefresh(forceDiagnostic:Bool) async {
-        let access=await AccessibilityLiveAccess.probe(pids:AccessibilityLiveAccess.candidatePIDs())
-        let shouldDiagnose=access != .allowed && (forceDiagnostic || diagnosticTime == nil || Date().timeIntervalSince(diagnosticTime!)>15)
+        let targetPID=NSRunningApplication.runningApplications(withBundleIdentifier:"com.electron.lark").first?.processIdentifier
+        let probe=await AccessibilityLiveAccess.probe(pids:AccessibilityLiveAccess.candidatePIDs())
+        let access=probe.access
+        let target=targetPID.flatMap {probe.targets[$0]} ?? .unknown
+        let observedCurrent=AXIsProcessTrusted()
+        let shouldDiagnose=forceDiagnostic || diagnosticTime == nil || observedCurrent != diagnosticCurrent ||
+            Date().timeIntervalSince(diagnosticTime!)>15 || (access == .allowed && diagnosticResult == false)
         let executable=Bundle.main.executableURL
         let supported=(Bundle.main.object(forInfoDictionaryKey:"DailyTodoAccessibilityProbeVersion") as? Int)==1
         if shouldDiagnose,supported,let executable {
@@ -107,13 +114,18 @@ enum AccessibilityLiveAccess {
                     return process.terminationStatus==0 && text=="allowed\n"
                 } catch {return false}
             }.value
-            diagnosticTime=Date()
+            diagnosticTime=Date();diagnosticCurrent=observedCurrent
         }
         let current=AXIsProcessTrusted()
-        let result=AccessibilityPermissionStatus.evaluate(current:current,fresh:diagnosticResult,access:access)
+        let result=permissionSession.evaluate(main:current,worker:probe.trusted,fresh:diagnosticResult,access:access,target:target)
+        AccessibilityAuthorizationGate.shared.confirm(ready:result.ready)
         if result != status {status=result}
         lastCheck=Date()
-        Runtime.report("accessibility-permission",payload:["state":String(describing:status),"current":current,"fresh":diagnosticResult.map {$0 as Any} ?? NSNull(),"access":access.rawValue,"manual":forceDiagnostic])
+        Runtime.report("accessibility-permission",payload:["state":String(describing:status),"current":current,"worker":probe.trusted,"target":target.rawValue,"fresh":diagnosticResult.map {$0 as Any} ?? NSNull(),"access":access.rawValue,"manual":forceDiagnostic])
+    }
+    func requireRestart() {
+        permissionSession.requireRestart();status = .restartRequired
+        AccessibilityAuthorizationGate.shared.confirm(ready:false)
     }
     func restart() {
         guard status == .restartRequired || status == .notGranted else{return}

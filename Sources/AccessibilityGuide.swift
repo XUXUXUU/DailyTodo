@@ -8,7 +8,7 @@ import SwiftUI
     static let shared = AccessibilityGuide()
 
     private static let settingsBundleIdentifier = "com.apple.systempreferences"
-    fileprivate static let panelSize = NSSize(width: 428, height: 148)
+    fileprivate static let panelSize = NSSize(width: 428, height: 204)
     private let applicationURL = Bundle.main.bundleURL
     private let permissions = AccessibilityPermission.shared
     private var panel: AccessibilityGuidePanel?
@@ -18,7 +18,7 @@ import SwiftUI
     private override init() { super.init() }
 
     func show(repair:Bool=false) {
-        if repair,panel != nil {close()}
+        if panel != nil {close()}
         if panel == nil {
             let panel = AccessibilityGuidePanel(
                 contentRect: NSRect(origin: .zero, size: Self.panelSize),
@@ -112,12 +112,13 @@ import SwiftUI
         let frontmost = NSWorkspace.shared.frontmostApplication
         let isOwnApp = frontmost?.processIdentifier == ProcessInfo.processInfo.processIdentifier
         let isSettings = frontmost?.bundleIdentifier == Self.settingsBundleIdentifier
-        let completion=continuation.take(ready:permissions.ready,setupOwnsFocus:isOwnApp || isSettings)
+        let isSetup=AccessibilityGuideForeground.isSetup(bundleIdentifier:frontmost?.bundleIdentifier,isOwnApp:isOwnApp)
+        let completion=continuation.take(ready:permissions.ready,setupOwnsFocus:isSetup)
         if completion != .none {
             finishAuthorization(completion,origin:frontmost?.bundleIdentifier)
             return
         }
-        guard isOwnApp || isSettings else {
+        guard isSetup else {
             panel.orderOut(nil)
             return
         }
@@ -228,7 +229,7 @@ enum AccessibilityGuidePositioning {
     var body:some View {
         VStack(alignment:.leading,spacing:8) {
             HStack {
-                Text(showingRecovery ? "先移除旧项，再拖入图标" : "拖入 Daily Todo，打开开关")
+                Text(permissions.status == .restartRequired ? "权限已开启，重启后继续" : showingRecovery ? "在辅助功能列表中移除旧项" : "① 从访达拖入辅助功能列表")
                     .font(.system(size:16,weight:.semibold)).accessibilityAddTraits(.isHeader)
                 Spacer(minLength:4)
                 Button(action:close) {
@@ -236,26 +237,37 @@ enum AccessibilityGuidePositioning {
                         .frame(width:24,height:24).background(.white.opacity(0.14),in:Circle())
                 }.buttonStyle(.plain).accessibilityLabel("关闭权限引导")
             }
-            HStack(spacing:14) {
-                AccessibilityAppDragIcon(size:44)
-                Image(systemName:"arrow.right").font(.system(size:17,weight:.medium)).opacity(0.8)
-                HStack(spacing:10) {
-                    Image(systemName:"list.bullet.rectangle").font(.system(size:28))
-                    Image(systemName:"switch.2").font(.system(size:24))
-                }.frame(width:116,height:42)
-                    .background(.white.opacity(0.10),in:RoundedRectangle(cornerRadius:9))
-                    .overlay(RoundedRectangle(cornerRadius:9).strokeBorder(.white.opacity(0.25),style:StrokeStyle(lineWidth:1,dash:[3])))
-                    .accessibilityLabel("拖入上方辅助功能列表并开启")
-                Spacer(minLength:4)
-                RevealCurrentAppButton(action:locateApp)
+            if permissions.status == .restartRequired {
+                HStack(spacing:14) {
+                    Image(systemName:"arrow.clockwise.circle.fill").font(.system(size:40))
+                    Text("重新打开 Daily Todo，刷新权限连接")
+                        .font(.system(size:13,weight:.medium))
+                }.frame(maxWidth:.infinity,alignment:.leading).frame(height:66)
+                Text("正文和已保存的设置会保留").font(.system(size:11)).frame(height:32)
+            } else if showingRecovery {
+                AccessibilityRemovalDiagram()
+                HStack {
+                    Spacer()
+                    guideButton("已移除，重新添加") {showingRecovery=false}
+                }.frame(height:32)
+            } else {
+                AccessibilityDragDiagram()
+                HStack(spacing:8) {
+                    RevealCurrentAppButton(action:locateApp)
+                    Spacer(minLength:4)
+                    Text("② 开关若未开启，再点一下")
+                        .font(.system(size:11,weight:.medium))
+                }
             }
             HStack(spacing:8) {
-                Button(showingRecovery ? "返回" : "未能成功？") {showingRecovery.toggle()}
-                    .font(.system(size:11)).buttonStyle(.plain)
+                if permissions.status != .restartRequired {
+                    Button(showingRecovery ? "返回添加指引" : "未能成功？") {showingRecovery.toggle()}
+                        .font(.system(size:11)).buttonStyle(.plain)
+                }
                 Spacer(minLength:4)
                 if permissions.status == .restartRequired {
                     guideButton("重启继续") {permissions.restart()}
-                } else if !permissions.ready {
+                } else if !permissions.ready && !showingRecovery {
                     guideButton("重新检测") {Task {await permissions.refresh(userInitiated:true)}}
                         .disabled(permissions.isChecking)
                 }
@@ -284,6 +296,68 @@ enum AccessibilityGuidePositioning {
     }
 }
 
+/// Removal happens entirely in the system list; Finder is only relevant afterward.
+struct AccessibilityRemovalDiagram:View {
+    var body:some View {
+        VStack(alignment:.leading,spacing:6) {
+            HStack(spacing:8) {
+                Image(nsImage:NSWorkspace.shared.icon(forFile:Bundle.main.bundlePath)).resizable().frame(width:22,height:22)
+                Text("Daily Todo").font(.system(size:12,weight:.semibold))
+                Spacer()
+                Text("① 点选这一行").font(.system(size:11,weight:.medium))
+            }.padding(.horizontal,10).frame(height:32)
+                .background(.white.opacity(0.16),in:RoundedRectangle(cornerRadius:6))
+                .overlay(RoundedRectangle(cornerRadius:6).strokeBorder(.white.opacity(0.65)))
+            HStack(spacing:8) {
+                Image(systemName:"plus").opacity(0.45)
+                Image(systemName:"minus").font(.system(size:12,weight:.bold))
+                    .frame(width:24,height:22).background(.white.opacity(0.20),in:RoundedRectangle(cornerRadius:5))
+                    .overlay(RoundedRectangle(cornerRadius:5).strokeBorder(.white,lineWidth:1.5))
+                Image(systemName:"arrow.left").font(.system(size:13,weight:.semibold))
+                Text("② 点击列表下方的「−」").font(.system(size:11,weight:.medium))
+            }.padding(.horizontal,10)
+        }.frame(height:66).accessibilityElement(children:.ignore)
+            .accessibilityLabel("先选中系统辅助功能列表中的 Daily Todo，再点击列表下方的减号移除旧授权")
+    }
+}
+
+/// The source and destination are named; the arrow denotes dragging, not opening.
+struct AccessibilityDragDiagram:View {
+    var body:some View {
+        HStack(spacing:8) {
+            miniWindow("访达",symbol:"folder.fill") {
+                HStack(spacing:7) {
+                    AccessibilityAppDragIcon(size:32)
+                    Text("DailyTodo.app").font(.system(size:11,weight:.semibold)).lineLimit(1)
+                }.frame(maxWidth:.infinity,alignment:.leading)
+            }
+            VStack(spacing:3) {
+                Image(systemName:"cursorarrow.motionlines").font(.system(size:18,weight:.medium))
+                Image(systemName:"arrow.right").font(.system(size:20,weight:.medium))
+                Text("按住拖动").font(.system(size:9,weight:.semibold))
+            }.frame(width:54).accessibilityLabel("按住访达中的应用，拖到系统辅助功能列表")
+            miniWindow("系统设置 · 辅助功能",symbol:"hand.raised.fill") {
+                HStack(spacing:5) {
+                    Image(nsImage:NSWorkspace.shared.icon(forFile:Bundle.main.bundlePath)).resizable().frame(width:20,height:20)
+                    Text("Daily Todo").font(.system(size:10,weight:.medium)).lineLimit(1)
+                    Spacer(minLength:0)
+                    Capsule().fill(.white.opacity(0.28)).frame(width:24,height:14)
+                        .overlay(alignment:.leading) {Circle().fill(.white).frame(width:10,height:10).padding(2)}
+                }.frame(height:32)
+            }
+        }.frame(height:66)
+    }
+    private func miniWindow<Content:View>(_ title:String,symbol:String,@ViewBuilder content:()->Content)->some View {
+        VStack(alignment:.leading,spacing:5) {
+            Label(title,systemImage:symbol).font(.system(size:9,weight:.semibold)).lineLimit(1)
+                .opacity(0.9)
+            content()
+        }.padding(8).frame(maxWidth:.infinity)
+            .background(.white.opacity(0.10),in:RoundedRectangle(cornerRadius:9))
+            .overlay(RoundedRectangle(cornerRadius:9).strokeBorder(.white.opacity(0.35),style:StrokeStyle(lineWidth:1,dash:[3])))
+    }
+}
+
 struct RevealCurrentAppButton:View {
     let action:()->Void
     @State private var hovered=false
@@ -299,7 +373,7 @@ struct RevealCurrentAppButton:View {
                 .contentShape(Rectangle())
         }
         .buttonStyle(.plain).onHover {hovered=$0}
-        .help("在访达中选中当前正在运行的 Daily Todo 应用")
+        .help("在访达中选中当前应用，再把它拖入系统设置的辅助功能列表")
     }
 }
 

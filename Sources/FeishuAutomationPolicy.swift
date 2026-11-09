@@ -39,8 +39,13 @@ struct FeishuAutomationConfiguration:Codable,Equatable {
     }
 }
 enum FeishuAutomationError:LocalizedError {
-    case message(String)
-    var errorDescription:String? { if case .message(let s)=self {return s};return nil }
+    case message(String),accessibilityRestartRequired
+    var errorDescription:String? {
+        switch self {
+        case .message(let s):return s
+        case .accessibilityRestartRequired:return "权限连接需要刷新，请在一键转发设置中点「重启继续」。正文和已保存的设置会保留。"
+        }
+    }
 }
 enum FeishuAutomationRules {
     static func selfName(profileTexts:[String])->String? {
@@ -132,5 +137,35 @@ struct FeishuProfileReadiness {
             self.texts=texts;nodes=nodeCount;since=now;return nil
         }
         return now-since >= 0.6 ? name : nil
+    }
+}
+
+/// Read shallow controls before deep content. Web content unrelated to delivery is opaque.
+enum FeishuAXTraversal {
+    static func shouldExpand(role:String,label:String,url:String)->Bool {
+        guard role == "AXWebArea" else {return true}
+        let pages=["search-command-bar","messenger-chat","ternantCardModal"]
+        return pages.contains(label) || ["/search/search-command-bar/","/messenger/messenger-chat/","/main-window/ternantCardModal/"].contains(where:url.contains)
+    }
+    struct Snapshot<Node> {let root:Node;let complete:Bool;let deepestLevel:Int}
+    static func build<Element,Node>(root:Element,limit:Int,maxDepth:Int,makeNode:(Element)->Node,children:(Element)->[Element],shouldExpand:(Node)->Bool,appendChild:(Node,Node)->Void)->Snapshot<Node> {
+        precondition(limit>0 && maxDepth>=0)
+        let first=makeNode(root)
+        var queue:[(Element,Node,Int)]=[(root,first,0)]
+        var cursor=0
+        var complete=true
+        var deepestLevel=0
+        while cursor<queue.count {
+            let (element,node,depth)=queue[cursor];cursor += 1
+            guard shouldExpand(node) else {continue}
+            let descendants=children(element)
+            guard depth<maxDepth else {if !descendants.isEmpty {complete=false};continue}
+            for child in descendants {
+                guard queue.count<limit else {complete=false;break}
+                let next=makeNode(child);appendChild(node,next)
+                queue.append((child,next,depth+1));deepestLevel=max(deepestLevel,depth+1)
+            }
+        }
+        return Snapshot(root:first,complete:complete,deepestLevel:deepestLevel)
     }
 }

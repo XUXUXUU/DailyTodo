@@ -51,10 +51,15 @@ struct FeishuAutomationOutcome {
         let clipboardGeneration=NSPasteboard.general.changeCount
         busy=true;progress="正在连接飞书…";lastResult=nil
         task=Task {
+            AccessibilityPermission.shared.startMonitoring()
+            defer {AccessibilityPermission.shared.stopMonitoring()}
             let outcome:FeishuAutomationOutcome
             do {
                 await AccessibilityPermission.shared.refresh()
-                guard trusted else {throw FeishuAutomationError.message("请先在一键转发设置中开启辅助功能。")}
+                guard trusted else {
+                    if AccessibilityPermission.shared.status == .restartRequired {throw FeishuAutomationError.accessibilityRestartRequired}
+                    throw FeishuAutomationError.message("请先在一键转发设置中开启辅助功能。")
+                }
                 guard let url=NSWorkspace.shared.urlForApplication(withBundleIdentifier:"com.electron.lark") else {throw FeishuAutomationError.message("未找到飞书，请先安装飞书。")}
                 let app=try await withCheckedThrowingContinuation { (continuation:CheckedContinuation<NSRunningApplication,Error>) in
                     let options=NSWorkspace.OpenConfiguration();options.activates=true
@@ -91,6 +96,7 @@ struct FeishuAutomationOutcome {
                 }
                 outcome=try await withTaskCancellationHandler(operation:{try await worker.value},onCancel:{worker.cancel()})
             } catch {
+                if let error=error as? FeishuAutomationError,case .accessibilityRestartRequired=error {AccessibilityPermission.shared.requireRestart()}
                 outcome=FeishuAutomationOutcome(title:testingSelf ? "测试未完成" : "转发未完成",detail:error is CancellationError ? "操作已取消，请检查飞书草稿。不会自动重发。" : error.localizedDescription,successful:false)
             }
             busy=false;lastResult=outcome.detail ?? outcome.title
@@ -145,9 +151,18 @@ private final class FeishuAXSession:@unchecked Sendable {
     private func fail(_ message:String)throws ->Never {throw FeishuAutomationError.message(message)}
     private func check()throws {
         try Task.checkCancellation()
+        guard AccessibilityAuthorizationGate.shared.permits() else {try fail("授权状态已更新，已停止操作。请回到设置检查后重试。")}
         let access=AccessibilityLiveAccess.read(pid:pid)
-        guard access == .allowed || (access == .unknown && AXIsProcessTrusted()) else {try fail("辅助功能权限已失效，已停止操作。") }
-        guard NSWorkspace.shared.frontmostApplication?.processIdentifier == pid else {try fail("飞书已不在前台，操作已暂停。请回到飞书检查后重试。")}
+        let current=AXIsProcessTrusted()
+        guard current,access == .allowed || access == .unknown else {
+            Runtime.report("feishu-access",payload:["current":current,"access":access.rawValue,"pid":pid])
+            throw FeishuAutomationError.accessibilityRestartRequired
+        }
+        let foreground=NSWorkspace.shared.frontmostApplication
+        guard foreground?.processIdentifier == pid else {
+            Runtime.report("feishu-interruption",payload:["foreground":foreground?.bundleIdentifier ?? "unknown","foregroundPID":foreground?.processIdentifier ?? 0,"expectedPID":pid])
+            try fail("飞书已不在前台，操作已暂停。请回到飞书检查后重试。")
+        }
     }
     private func attribute(_ element:AXUIElement,_ key:String)->CFTypeRef? {
         var value:CFTypeRef?
@@ -159,16 +174,17 @@ private final class FeishuAXSession:@unchecked Sendable {
         if let value=attribute(app,kAXFocusedWindowAttribute),CFGetTypeID(value)==AXUIElementGetTypeID() {window=unsafeBitCast(value,to:AXUIElement.self)}
         else if let windows=attribute(app,kAXWindowsAttribute) as? [AXUIElement],let first=windows.first {window=first}
         else {return FeishuAXNode(app)}
-        var budget=1200
-        func read(_ element:AXUIElement,_ depth:Int)->FeishuAXNode {
-            let node=FeishuAXNode(element);budget -= 1
-            if depth < 35,budget > 0,let children=attribute(element,kAXChildrenAttribute) as? [AXUIElement] {
-                for child in children where budget > 0 {node.children.append(read(child,depth+1))}
-            }
-            return node
-        }
-        return read(window,0)
+        var count=0
+        let snapshot=FeishuAXTraversal.build(root:window,limit:1200,maxDepth:128,makeNode:{ element in
+            count += 1;return FeishuAXNode(element)
+        },children:{self.attribute($0,kAXChildrenAttribute) as? [AXUIElement] ?? []},shouldExpand:{
+            FeishuAXTraversal.shouldExpand(role:$0.role,label:$0.label,url:$0.url)
+        },appendChild:{$0.children.append($1)})
+        Runtime.report("feishu-tree",payload:["nodes":count,"complete":snapshot.complete,"deepestLevel":snapshot.deepestLevel])
+        guard snapshot.complete else {try fail("飞书界面内容过多，无法完整核对草稿与附件。请关闭无关面板后重试，或手动发送。") }
+        return snapshot.root
     }
+
     private func wait<T>(_ message:String,seconds:Double=15,find:(FeishuAXNode)throws ->T?) async throws ->T {
         let end=ProcessInfo.processInfo.systemUptime+seconds
         repeat {
@@ -322,7 +338,7 @@ private final class FeishuAXSession:@unchecked Sendable {
                 self.searchWeb(root)==nil && !accountCard(root) ? true:nil
             }
         }
-        let root:FeishuAXNode=try await wait("请先登录飞书后重试。",seconds:25) {root in
+        let root:FeishuAXNode=try await wait("未能识别飞书账号入口，请回到飞书消息页面后重试。",seconds:25) {root in
             root.all.contains(where:{$0.role==kAXButtonRole && $0.label=="我的头像"}) ? root : nil
         }
         let buttons=root.all.filter{$0.role==kAXButtonRole && $0.label=="我的头像"}
@@ -381,16 +397,14 @@ private final class FeishuAXSession:@unchecked Sendable {
         }
         try click(person)
         progress("正在核对聊天对象…")
-        let pair:(FeishuAXNode,FeishuAXNode)=try await wait("聊天对象或输入框未能确认，已停止操作。") {root in
-            guard self.searchWeb(root)==nil,let chat=self.chatWeb(root),let editor=self.composer(chat,config:config) else {return nil}
+        let pair:(FeishuAXNode,FeishuAXNode)=try await wait("聊天输入区尚未就绪或已有草稿，已保留原文。请检查飞书后重试；Todo 仍在剪贴板中。",seconds:8) {root in
+            guard self.searchWeb(root)==nil,let chat=self.chatWeb(root),let editor=self.composer(chat,config:config),
+                  self.emptyComposer(editor,config:config) else {return nil}
+            // Electron may expose a newly mounted editor before its read-only
+            // placeholder and editability attributes are ready. Wait for actual
+            // empty-composer proof; never turn an unknown read into permission.
             return (chat,editor)
         }
-        if config.recipientIsSelf {
-            guard FeishuAutomationRules.isVerifiedSelfComposer(pair.1.value,editableText:hasEditableText(pair.1)) else {
-                try fail("未能确认这是本人空聊天，测试已停止；已有内容保持不变。")
-            }
-        }
-        guard emptyComposer(pair.1,config:config) else {try fail("这个聊天已有草稿，已保留原文；请处理草稿后再转发。Todo 仍在剪贴板中。")}
         // Composer sibling attachments also belong to an existing draft.
         let draftArea=pair.0.all.first(where:{$0.children.contains(where:{$0 === pair.1})})
         if let draftArea,draftArea.all.contains(where:{$0.role==kAXButtonRole && ["移除附件","删除附件","取消上传"].contains($0.label)}) {try fail("聊天中已有待发送附件，请先处理后重试。")}

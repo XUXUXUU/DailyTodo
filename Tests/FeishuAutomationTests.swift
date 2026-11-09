@@ -4,6 +4,35 @@ import Foundation
     static func main() throws {
         var count=0
         func check(_ value:Bool,_ name:String) { precondition(value,name);count += 1;print("PASS:",name) }
+        // A document before the sidebar used to exhaust the depth-first budget.
+        final class Fixture {
+            let name:String;let role:String;let url:String
+            var children:[Fixture]
+            init(_ name:String,role:String="AXGroup",url:String="",_ children:[Fixture]=[]) {self.name=name;self.role=role;self.url=url;self.children=children}
+        }
+        let document=Fixture("document",role:"AXWebArea",url:"https://example.feishu.cn/wiki/private",(0..<1800).map {Fixture("private-document-\($0)")})
+        let history=Fixture("history",role:"AXGroup",url:"",(0..<1800).map {Fixture("old-message-\($0)")})
+        let chat=Fixture("messenger-chat",role:"AXWebArea",url:"file:///messenger/messenger-chat/zh-CN.html",[history,Fixture("composer",role:"AXTextArea")])
+        let root=Fixture("window",role:"AXGroup",url:"",[document,chat,Fixture("sidebar",role:"AXGroup",url:"",[Fixture("avatar",role:"AXButton"),Fixture("search",role:"AXButton")])])
+        var observed:[String]=[]
+        let bounded = FeishuAXTraversal.build(root:root,limit:20,maxDepth:35,makeNode:{ node in observed.append(node.name);return node },children:{$0.children},shouldExpand:{FeishuAXTraversal.shouldExpand(role:$0.role,label:$0.name,url:$0.url)},appendChild:{_,_ in})
+        check(observed.contains("avatar") && observed.contains("search"),"长文档不能耗尽额度导致头像和搜索入口消失")
+        check(observed.contains("composer"),"深层历史不能遮蔽同级聊天输入框")
+        check(!observed.contains(where:{$0.hasPrefix("private-document-")}),"不读取无关文档正文")
+        check(observed.count==20,"AX遍历严格限制节点数量")
+        check(!bounded.complete,"不完整树不能用于判断空草稿或缺少附件")
+        let opaque=FeishuAXTraversal.build(root:document,limit:20,maxDepth:35,makeNode:{$0},children:{$0.children},shouldExpand:{FeishuAXTraversal.shouldExpand(role:$0.role,label:$0.name,url:$0.url)},appendChild:{_,_ in})
+        check(opaque.complete,"明确排除的云文档不算不安全截断")
+        let exact=FeishuAXTraversal.build(root:Fixture("small",role:"AXGroup",url:"",[Fixture("leaf")]),limit:2,maxDepth:1,makeNode:{$0},children:{$0.children},shouldExpand:{_ in true},appendChild:{_,_ in})
+        check(exact.complete,"正好到达节点上限但没有遗漏仍完整")
+
+        check(FeishuAXTraversal.shouldExpand(role:"AXWebArea",label:"ternantCardModal",url:""),"账号卡片允许读取")
+        check(FeishuAXTraversal.shouldExpand(role:"AXWebArea",label:"search-command-bar",url:""),"搜索面板允许读取")
+        check(!FeishuAXTraversal.shouldExpand(role:"AXWebArea",label:"messenger",url:"file:///messenger/messenger/zh-CN.html"),"消息列表不消耗聊天与原生控件预算")
+        var depths:[String]=[]
+        let shallow = FeishuAXTraversal.build(root:root,limit:100,maxDepth:1,makeNode:{depths.append($0.name);return $0},children:{$0.children},shouldExpand:{_ in true},appendChild:{_,_ in})
+        check(depths.count==4 && !depths.contains("avatar"),"遍历仍遵守最大深度")
+        check(!shallow.complete,"深度截断必须被识别，不能把深层附件当不存在")
         let suite="DailyTodo.FeishuTest."+UUID().uuidString
         let prefs=UserDefaults(suiteName:suite)!
         defer { prefs.removePersistentDomain(forName:suite) }

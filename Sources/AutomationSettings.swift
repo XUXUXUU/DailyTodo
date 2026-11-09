@@ -10,7 +10,6 @@ struct AutomationSettingsCard:View {
     @State private var draft=FeishuAutomationConfiguration()
     @State private var error:String?
     @State private var saved=false
-    @State private var showsRecovery=false
     private let blue=Color(nsColor:.systemBlue)
     private var cardWidth:CGFloat {min(536,(NSScreen.screens.map {$0.visibleFrame.width}.min() ?? 900)-48)}
     private var cardHeight:CGFloat {min(feedbackMessage == nil ? 400 : 440,(NSScreen.screens.map {$0.visibleFrame.height}.min() ?? 900)-64)}
@@ -108,20 +107,8 @@ struct AutomationSettingsCard:View {
                 Button("重启继续") {permissions.restart()}.buttonStyle(.borderedProminent).controlSize(.small)
             case .notGranted:
                 if permissions.hasOpenedSettings {
-                    Button("未能成功？") {showsRecovery=true}
+                    Button("未能成功？") {automation.requestPermission(repair:true)}
                         .font(.system(size:12)).buttonStyle(.link)
-                        .popover(isPresented:$showsRecovery) {
-                            VStack(spacing:14) {
-                                Text("移除旧项，再拖入图标并开启")
-                                    .font(.system(size:14,weight:.semibold))
-                                HStack(spacing:18) {
-                                    AccessibilityAppDragIcon(size:48)
-                                    Image(systemName:"arrow.right").foregroundStyle(blue)
-                                    Image(systemName:"list.bullet.rectangle").font(.system(size:34)).foregroundStyle(blue)
-                                }
-                                RevealCurrentAppButton {NSWorkspace.shared.activateFileViewerSelecting([Bundle.main.bundleURL])}
-                            }.padding(20).frame(width:280)
-                        }
                 }
                 Button("前往设置") {automation.requestPermission()}.buttonStyle(.borderedProminent).controlSize(.small)
             }
